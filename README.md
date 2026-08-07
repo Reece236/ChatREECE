@@ -129,6 +129,10 @@ If you'd rather not use the bubble, link straight to the chat
 
 ## Deploying
 
+**See [DEPLOY.md](DEPLOY.md) for step-by-step instructions.** There's a
+`render.yaml`, a `fly.toml` and a `docker-compose.yml` in here, so the host does
+most of the configuring itself.
+
 Any host that runs a Node process works — Render, Railway, Fly.io, a VPS.
 
 Two things matter:

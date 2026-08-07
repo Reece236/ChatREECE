@@ -1,0 +1,13 @@
+node_modules
+data
+.env
+.env.local
+.git
+.gitignore
+*.log
+test
+README.md
+DEPLOY.md
+render.yaml
+fly.toml
+docker-compose.yml

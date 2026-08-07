@@ -1,0 +1,44 @@
+# Render blueprint. In the Render dashboard: New > Blueprint, point it at this
+# repo, and it builds everything below without further clicking.
+#
+# Note the plan: ChatREECE keeps conversations in a SQLite file on disk, and
+# Render only offers persistent disks on paid instance types. On the free plan
+# the filesystem is wiped on every deploy and the service sleeps when idle,
+# which would invalidate every visitor's key. That is why this asks for
+# "starter" rather than "free".
+services:
+  - type: web
+    name: chatreece
+    runtime: node
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/config
+
+    disk:
+      name: chatreece-data
+      mountPath: /var/data
+      sizeGB: 1
+
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATA_DIR
+        value: /var/data
+      # Render terminates TLS in front of the app, so the app has to be told to
+      # trust the proxy or login cookies lose their Secure flag and rate
+      # limiting sees Render's IP instead of the visitor's.
+      - key: TRUST_PROXY
+        value: "1"
+      - key: SITE_NAME
+        value: ChatREECE
+      - key: OWNER_NAME
+        value: Reece
+      # sync: false means "prompt me for this in the dashboard, don't store it
+      # in git". Set your owner key and the site you embed from there.
+      - key: ADMIN_KEY
+        sync: false
+      - key: EMBED_ORIGINS
+        sync: false
+      - key: NOTIFY_WEBHOOK_URL
+        sync: false
