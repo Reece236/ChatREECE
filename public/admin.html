@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>Answering desk</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<!-- Shown until the owner cookie checks out -->
+<main class="landing hidden" id="gate">
+  <div class="card">
+    <div class="brand">
+      <div class="brand-mark">R</div>
+      <div>
+        <div class="brand-name">Answering desk</div>
+        <div class="brand-sub">Owner access</div>
+      </div>
+    </div>
+    <h1>Enter your owner key</h1>
+    <p class="lede">The same kind of key your visitors use — yours just opens every conversation.</p>
+    <form id="gateForm">
+      <input
+        class="field key-input"
+        id="gateKey"
+        type="password"
+        autocomplete="current-password"
+        autocapitalize="none"
+        spellcheck="false"
+        placeholder="your owner key">
+      <button class="btn btn-primary btn-block" type="submit" style="margin-top:10px;">Open the desk</button>
+    </form>
+    <div id="gateNotice"></div>
+  </div>
+</main>
+
+<div class="shell with-rail hidden" id="desk">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-head">
+      <div style="flex:1;min-width:0">
+        <div class="brand-name" style="font-size:15px">Answering desk</div>
+        <div class="brand-sub" id="inboxSummary">—</div>
+      </div>
+      <button class="btn-ghost" id="filterBtn" title="Show only chats waiting on you">All</button>
+    </div>
+    <div class="sidebar-list" id="inboxList"></div>
+    <div class="sidebar-foot">
+      <span id="deskStats">—</span>
+      <button class="btn-ghost" id="signOutBtn">Sign out</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <button class="btn-ghost menu-btn" id="menuBtn" aria-label="Show inbox">☰</button>
+      <div style="min-width:0">
+        <div class="topbar-title" id="threadTitle">Pick a conversation</div>
+        <div class="topbar-sub" id="threadSub"></div>
+      </div>
+      <div class="spacer"></div>
+      <button class="btn-ghost menu-btn" id="railBtn" aria-label="Visitor details">ⓘ</button>
+    </header>
+
+    <div class="stream" id="stream">
+      <div class="stream-inner" id="streamInner"></div>
+    </div>
+
+    <div class="composer-wrap" id="composerWrap">
+      <form class="composer" id="composer">
+        <textarea id="input" rows="1" placeholder="Write your answer…" spellcheck="true"></textarea>
+        <button class="send-btn" id="sendBtn" type="submit" aria-label="Send" disabled>↑</button>
+      </form>
+      <div class="composer-hint">Enter to send · Shift+Enter for a new line · This lands as the answer in their chat</div>
+    </div>
+  </main>
+
+  <aside class="rail" id="rail">
+    <div class="rail-block">
+      <h3>Visitor</h3>
+      <div class="rail-value" id="visitorName">—</div>
+      <div class="rail-value" style="color:var(--text-faint);font-size:12.5px" id="visitorMeta"></div>
+    </div>
+    <div class="rail-block">
+      <h3>Private note</h3>
+      <textarea class="field" id="noteBox" placeholder="Only you can see this."></textarea>
+      <button class="btn btn-block" id="saveNoteBtn" style="margin-top:7px;">Save note</button>
+      <div id="noteNotice"></div>
+    </div>
+    <div class="rail-block">
+      <h3>Actions</h3>
+      <button class="btn btn-block" id="blockBtn" style="margin-bottom:7px;">Block this key</button>
+      <button class="btn btn-block" id="deleteBtn">Delete conversation</button>
+    </div>
+  </aside>
+</div>
+
+<div class="scrim hidden" id="scrim"></div>
+
+<script type="module" src="/js/admin.js"></script>
+</body>
+</html>

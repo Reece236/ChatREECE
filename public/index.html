@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>ChatREECE</title>
+<meta name="description" content="Ask a question, get a real answer. No account, no email — just a key you keep.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<main class="landing">
+  <div class="card">
+    <div class="brand">
+      <div class="brand-mark" id="brandMark">R</div>
+      <div>
+        <div class="brand-name" id="brandName">ChatREECE</div>
+        <div class="brand-sub">Ask anything. A real person answers.</div>
+      </div>
+    </div>
+
+    <!-- Step 1: choose a path ------------------------------------------->
+    <section id="stepStart">
+      <h1>Start chatting</h1>
+      <p class="lede">
+        No email, no password to invent. Tap below and you'll get a key made of
+        two everyday words — that key is how you come back to your conversation later.
+      </p>
+      <button class="btn btn-primary btn-block" id="newKeyBtn">Get my key and start</button>
+
+      <div class="divider">or</div>
+
+      <form id="loginForm" autocomplete="on">
+        <label for="keyInput" class="fine" style="display:block;text-align:left;margin:0 0 7px;">
+          Already have a key?
+        </label>
+        <input
+          class="field key-input"
+          id="keyInput"
+          name="password"
+          type="text"
+          inputmode="text"
+          autocapitalize="none"
+          autocorrect="off"
+          spellcheck="false"
+          autocomplete="current-password"
+          placeholder="meadow-drifting-472">
+        <button class="btn btn-block" id="loginBtn" type="submit" style="margin-top:9px;">
+          Open my chat
+        </button>
+      </form>
+
+      <div id="startNotice"></div>
+      <p class="fine">Spacing and capitals don't matter — "Meadow Drifting 472" works too.</p>
+    </section>
+
+    <!-- Step 2: here is your key ---------------------------------------->
+    <section id="stepKey" class="hidden">
+      <h1>This is your key</h1>
+      <p class="lede">Write it down or screenshot it. It's the only way back into this conversation.</p>
+
+      <div class="key-display">
+        <div class="key-label">Your key</div>
+        <div class="key-text" id="keyText">…</div>
+      </div>
+
+      <div class="row">
+        <button class="btn" id="copyBtn">Copy key</button>
+        <button class="btn btn-primary" id="continueBtn">Start chatting</button>
+      </div>
+
+      <div id="keyNotice"></div>
+      <p class="fine">
+        Anyone with this key can read your chat, so keep it to yourself.
+        There's no way to recover it if it's lost.
+      </p>
+    </section>
+  </div>
+</main>
+
+<script type="module" src="/js/login.js"></script>
+</body>
+</html>
