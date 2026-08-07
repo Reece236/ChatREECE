@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server/index.js",
     "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
-    "smoke": "node --disable-warning=ExperimentalWarning test/smoke.js"
+    "smoke": "node --disable-warning=ExperimentalWarning test/smoke.js",
+    "key": "node scripts/make-key.js"
   },
   "dependencies": {
     "express": "^4.21.2"

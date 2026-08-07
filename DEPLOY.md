@@ -48,17 +48,61 @@ Settings → Custom Domain), and your desk is at `/admin`.
 
 ## Option B — Fly.io (cheapest always-on)
 
+### One-time setup
+
 ```bash
-fly launch --copy-config --no-deploy      # edit the app name in fly.toml first
-fly volumes create chatreece_data --size 1
-fly secrets set ADMIN_KEY="your-owner-key-here"
-fly secrets set EMBED_ORIGINS="https://reece.io"
-fly deploy
+# macOS
+brew install flyctl
+# Linux
+curl -L https://fly.io/install.sh | sh
+
+fly auth signup     # or: fly auth login
 ```
 
-`fly.toml` deliberately sets `auto_stop_machines = false`. Live message delivery
-holds a long-lived connection open per visitor, and suspending the machine
-underneath that drops it.
+Fly asks for a card even on small workloads. A single `shared-cpu-1x` machine
+with 512 MB and a 1 GB volume runs a few dollars a month.
+
+### Deploy
+
+```bash
+./scripts/deploy-fly.sh reece-chat https://reece.io
+```
+
+First argument is your app name, second (optional) is the site you'll embed the
+widget on. The script creates the app, creates the 1 GB volume, generates an
+owner key in the house style, and deploys — then prints your URLs and your key.
+
+It's safe to re-run. Every step checks whether it's already been done, so if
+something fails halfway you can fix it and run it again without losing the
+volume or your key.
+
+Prefer to do it by hand:
+
+```bash
+fly apps create reece-chat
+fly volumes create chatreece_data --app reece-chat --region iad --size 1
+fly secrets set ADMIN_KEY="$(npm run -s key)" --app reece-chat
+fly deploy --app reece-chat --ha=false
+```
+
+### Two flags that matter
+
+`--ha=false` keeps this to a single machine. Fly's default is two, and two would
+mean two processes writing one SQLite file, with a visitor connected to one
+machine never receiving a reply you sent from the other.
+
+`auto_stop_machines = false` in `fly.toml` keeps the machine awake. Live
+delivery holds a long-lived connection open per visitor, and suspending the
+machine underneath that drops it.
+
+### Handy afterwards
+
+```bash
+fly logs --app reece-chat                  # watch it run
+fly ssh console --app reece-chat           # poke around /data
+fly secrets set OWNER_NAME="Reece" --app reece-chat
+fly apps open --app reece-chat             # open it in a browser
+```
 
 ## Option C — Your own VPS or machine
 

@@ -1,8 +1,10 @@
-# Fly.io config. Change the app name to something unique, then:
-#   fly launch --copy-config --no-deploy
-#   fly volumes create chatreece_data --size 1
-#   fly secrets set ADMIN_KEY="your-owner-key"
-#   fly deploy
+# Fly.io config for ChatREECE.
+#
+# Easiest path is `./scripts/deploy-fly.sh <your-app-name>`, which runs every
+# step below in order and generates your owner key for you.
+#
+# App names are globally unique across all of Fly, so "chatreece" is very
+# likely taken. Change it here, or let `fly launch` pick/prompt for one.
 app = "chatreece"
 primary_region = "iad"
 
@@ -12,12 +14,16 @@ primary_region = "iad"
 [env]
   PORT = "3000"
   DATA_DIR = "/data"
+  # Fly terminates TLS at its edge, so the app must trust the proxy or login
+  # cookies lose their Secure flag and rate limiting sees Fly's IP rather than
+  # the visitor's.
   TRUST_PROXY = "1"
   SITE_NAME = "ChatREECE"
   OWNER_NAME = "Reece"
 
-# Conversations, the key pepper and the generated admin key live here. Without
-# this volume a deploy would take every visitor's key with it.
+# Conversations, the key pepper and the generated admin key all live in /data.
+# Without this volume a deploy would take every visitor's key with it, and
+# because keys carry no email address nobody's access could be restored.
 [[mounts]]
   source = "chatreece_data"
   destination = "/data"
@@ -25,9 +31,10 @@ primary_region = "iad"
 [http_service]
   internal_port = 3000
   force_https = true
-  # Deliberately not auto-stopping. Live delivery holds a long server-sent-events
+  # Deliberately always-on. Live delivery holds a long-lived server-sent-events
   # connection open per visitor, and suspending the machine underneath that
-  # drops it. One always-on machine also keeps SQLite to a single writer.
+  # drops it. A single machine also keeps SQLite to one writer — do not scale
+  # this to 2+, they would fight over the same database file.
   auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
@@ -40,5 +47,6 @@ primary_region = "iad"
     path = "/api/config"
 
 [[vm]]
-  size = "shared-cpu-1x"
+  cpu_kind = "shared"
+  cpus = 1
   memory = "512mb"
