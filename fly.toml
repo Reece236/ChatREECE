@@ -1,52 +1,41 @@
-# Fly.io config for ChatREECE.
+# fly.toml app configuration file generated for chatreece on 2026-08-07T21:41:27Z
 #
-# Easiest path is `./scripts/deploy-fly.sh <your-app-name>`, which runs every
-# step below in order and generates your owner key for you.
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
-# App names are globally unique across all of Fly, so "chatreece" is very
-# likely taken. Change it here, or let `fly launch` pick/prompt for one.
-app = "chatreece"
-primary_region = "iad"
+
+app = 'chatreece'
+primary_region = 'iad'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  PORT = "3000"
-  DATA_DIR = "/data"
-  # Fly terminates TLS at its edge, so the app must trust the proxy or login
-  # cookies lose their Secure flag and rate limiting sees Fly's IP rather than
-  # the visitor's.
-  TRUST_PROXY = "1"
-  SITE_NAME = "ChatREECE"
-  OWNER_NAME = "Reece"
+  DATA_DIR = '/data'
+  OWNER_NAME = 'Reece'
+  PORT = '3000'
+  SITE_NAME = 'ChatREECE'
+  TRUST_PROXY = '1'
 
-# Conversations, the key pepper and the generated admin key all live in /data.
-# Without this volume a deploy would take every visitor's key with it, and
-# because keys carry no email address nobody's access could be restored.
 [[mounts]]
-  source = "chatreece_data"
-  destination = "/data"
+  source = 'chatreece_data'
+  destination = '/data'
 
 [http_service]
-  internal_port = 3000
+  internal_port = 8080
   force_https = true
-  # Deliberately always-on. Live delivery holds a long-lived server-sent-events
-  # connection open per visitor, and suspending the machine underneath that
-  # drops it. A single machine also keeps SQLite to one writer — do not scale
-  # this to 2+, they would fight over the same database file.
-  auto_stop_machines = false
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
 
   [[http_service.checks]]
-    interval = "30s"
-    timeout = "5s"
-    grace_period = "10s"
-    method = "GET"
-    path = "/api/config"
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/api/config'
 
 [[vm]]
-  cpu_kind = "shared"
+  memory = '512mb'
+  cpu_kind = 'shared'
   cpus = 1
-  memory = "512mb"
+  memory_mb = 256
