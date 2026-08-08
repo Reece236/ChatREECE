@@ -1,208 +1,146 @@
 import { api, formatBody, timeLabel, dayLabel, relativeLabel } from './api.js';
+import { mountBanner, permission, supported } from './notify.js';
 
 const $ = (id) => document.getElementById(id);
 
-// The widget opens /chat?embed=1, but a visitor who signs in from inside the
-// bubble navigates to a plain /chat and would otherwise get the full-width
-// layout crammed into a 390px iframe. Checking the frame itself covers both.
+// The widget opens /chat?embed=1, but signing in from inside the bubble lands
+// on a plain /chat. Checking the frame covers both.
 const embedded =
   new URLSearchParams(location.search).get('embed') === '1' || window.self !== window.top;
-if (embedded) {
-  document.body.classList.add('embedded');
-  document.getElementById('sidebar').classList.add('hidden');
-  // Without the sidebar there is nothing for the hamburger to reveal.
-  document.getElementById('menuBtn').classList.add('hidden');
-  document.querySelector('.shell').style.gridTemplateColumns = '1fr';
-}
+if (embedded) document.body.classList.add('embed');
 
 const state = {
-  user: null,
   ownerName: 'Reece',
   ownerOnline: false,
   conversations: [],
   activeId: null,
   messages: [],
+  lastTyping: 0,
   typingTimer: null,
-  lastTypingPing: 0,
   baseTitle: 'Chat',
 };
 
-const LAST_CHAT_KEY = 'chatreece:lastChat';
+const LAST = 'chatreece:last';
 
-// ---------------------------------------------------------------------------
-// Rendering
-// ---------------------------------------------------------------------------
+// --- rendering -------------------------------------------------------------
 
-function renderThreads() {
-  const list = $('threadList');
-  list.innerHTML = '';
-  for (const conversation of state.conversations) {
-    const button = document.createElement('button');
-    button.className = `thread${conversation.id === state.activeId ? ' active' : ''}`;
-    button.type = 'button';
+function renderList() {
+  const list = $('list');
+  list.textContent = '';
+  for (const c of state.conversations) {
+    const item = document.createElement('button');
+    item.className = 'item';
+    item.type = 'button';
+    if (c.id === state.activeId) item.setAttribute('aria-current', 'true');
 
     const title = document.createElement('div');
-    title.className = 'thread-title';
-    if (conversation.unread > 0 && conversation.id !== state.activeId) {
-      const dot = document.createElement('span');
-      dot.className = 'dot';
-      title.appendChild(dot);
+    title.className = 't';
+    if (c.unread > 0 && c.id !== state.activeId) {
+      const badge = document.createElement('span');
+      badge.className = 'count';
+      badge.textContent = String(c.unread);
+      title.appendChild(badge);
     }
-    title.appendChild(document.createTextNode(conversation.title || 'New chat'));
-    button.appendChild(title);
+    title.append(c.title || 'New question');
+    item.appendChild(title);
 
-    if (conversation.preview) {
+    if (c.preview) {
       const preview = document.createElement('div');
-      preview.className = 'thread-preview';
-      preview.textContent = conversation.preview;
-      button.appendChild(preview);
+      preview.className = 'p';
+      preview.textContent = c.preview;
+      item.appendChild(preview);
     }
 
     const meta = document.createElement('div');
-    meta.className = 'thread-meta';
-    meta.textContent = relativeLabel(conversation.updated_at);
-    button.appendChild(meta);
+    meta.className = 'm';
+    meta.textContent = relativeLabel(c.updated_at);
+    item.appendChild(meta);
 
-    button.addEventListener('click', () => {
-      closeSidebar();
-      openConversation(conversation.id);
+    item.addEventListener('click', () => {
+      closeSide();
+      open(c.id);
     });
-    list.appendChild(button);
+    list.appendChild(item);
   }
 }
 
-function messageNode(message) {
-  const wrap = document.createElement('div');
-  wrap.className = `msg ${message.role === 'user' ? 'from-user' : 'from-owner'}`;
-  wrap.dataset.id = message.id;
+function messageNode(m) {
+  const row = document.createElement('div');
+  row.className = `msg${m.role === 'user' ? ' mine' : ''}`;
 
-  const avatar = document.createElement('div');
-  avatar.className = `avatar ${message.role === 'user' ? 'user' : 'owner'}`;
-  avatar.textContent = message.role === 'user' ? 'You' : state.ownerName.slice(0, 1).toUpperCase();
-  if (message.role === 'user') avatar.style.fontSize = '9px';
+  const from = document.createElement('div');
+  from.className = 'from';
+  from.textContent = `${m.role === 'user' ? 'You' : state.ownerName} · ${timeLabel(m.created_at)}`;
 
-  const stack = document.createElement('div');
-  stack.className = 'stack';
+  const body = document.createElement('div');
+  body.className = 'body';
+  body.innerHTML = formatBody(m.body);
 
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  bubble.innerHTML = formatBody(message.body);
-
-  const time = document.createElement('div');
-  time.className = 'msg-time';
-  time.textContent =
-    message.pending ? 'Sending…' : `${message.role === 'user' ? 'You' : state.ownerName} · ${timeLabel(message.created_at)}`;
-
-  stack.appendChild(bubble);
-  stack.appendChild(time);
-  wrap.appendChild(avatar);
-  wrap.appendChild(stack);
-  return wrap;
+  row.appendChild(from);
+  row.appendChild(body);
+  return row;
 }
 
 function renderStream() {
-  const inner = $('streamInner');
-  inner.innerHTML = '';
+  const wrap = $('wrap');
+  wrap.textContent = '';
 
   if (state.messages.length === 0) {
-    inner.appendChild(emptyState());
+    const blank = document.createElement('div');
+    blank.className = 'blank';
+    const h = document.createElement('h2');
+    h.textContent = `Ask ${state.ownerName} anything`;
+    const p = document.createElement('p');
+    p.textContent =
+      'Your question goes to a real person, so an answer arrives when it arrives. Turn on notifications and you will be told when it does.';
+    blank.appendChild(h);
+    blank.appendChild(p);
+    wrap.appendChild(blank);
     return;
   }
 
-  let lastDay = '';
-  for (const message of state.messages) {
-    const day = dayLabel(message.created_at);
-    if (day !== lastDay) {
+  let day = '';
+  for (const m of state.messages) {
+    const label = dayLabel(m.created_at);
+    if (label !== day) {
       const sep = document.createElement('div');
-      sep.className = 'day-sep';
-      sep.textContent = day;
-      inner.appendChild(sep);
-      lastDay = day;
+      sep.className = 'day';
+      sep.textContent = label;
+      wrap.appendChild(sep);
+      day = label;
     }
-    inner.appendChild(messageNode(message));
+    wrap.appendChild(messageNode(m));
   }
 
-  // A short note after the visitor's last message so nobody sits there
-  // wondering whether an instant AI reply is coming. It is not — a person is.
   const last = state.messages[state.messages.length - 1];
-  if (last.role === 'user' && !last.pending) {
+  if (last.role === 'user') {
     const note = document.createElement('div');
-    note.className = 'day-sep';
-    note.style.textTransform = 'none';
-    note.style.letterSpacing = '0';
+    note.className = 'note';
     note.textContent = state.ownerOnline
       ? `${state.ownerName} is online and will reply here.`
-      : `Delivered. ${state.ownerName} replies here — keep your key and check back any time.`;
-    inner.appendChild(note);
+      : `Sent. ${state.ownerName} will reply here.`;
+    wrap.appendChild(note);
   }
 
-  scrollToEnd();
-}
-
-function emptyState() {
-  const box = document.createElement('div');
-  box.className = 'empty-state';
-
-  const heading = document.createElement('h2');
-  heading.textContent = `Ask ${state.ownerName} anything`;
-  const lede = document.createElement('p');
-  lede.textContent =
-    'Type a question below. It goes straight to a real person, so answers arrive when they arrive — your key brings you back to read them.';
-  box.appendChild(heading);
-  box.appendChild(lede);
-
-  const grid = document.createElement('div');
-  grid.className = 'suggestions';
-  const prompts = [
-    'What do you do?',
-    'Can you help with a project?',
-    'How do I get in touch?',
-    'What are you working on lately?',
-  ];
-  for (const prompt of prompts) {
-    const button = document.createElement('button');
-    button.className = 'suggestion';
-    button.type = 'button';
-    button.textContent = prompt;
-    button.addEventListener('click', () => {
-      $('input').value = prompt;
-      $('input').focus();
-      autosize();
-      updateSendState();
-    });
-    grid.appendChild(button);
-  }
-  box.appendChild(grid);
-  return box;
+  toBottom();
 }
 
 function showTyping(on) {
-  const existing = document.getElementById('typingRow');
+  const existing = $('typing');
   if (!on) {
     if (existing) existing.remove();
     return;
   }
   if (existing) return;
-
-  const wrap = document.createElement('div');
-  wrap.className = 'msg from-owner';
-  wrap.id = 'typingRow';
-
-  const avatar = document.createElement('div');
-  avatar.className = 'avatar owner';
-  avatar.textContent = state.ownerName.slice(0, 1).toUpperCase();
-
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  bubble.innerHTML = '<span class="typing-dots"><span></span><span></span><span></span></span>';
-
-  wrap.appendChild(avatar);
-  wrap.appendChild(bubble);
-  $('streamInner').appendChild(wrap);
-  scrollToEnd();
+  const row = document.createElement('div');
+  row.className = 'note';
+  row.id = 'typing';
+  row.textContent = `${state.ownerName} is typing…`;
+  $('wrap').appendChild(row);
+  toBottom();
 }
 
-function scrollToEnd() {
+function toBottom() {
   const stream = $('stream');
   requestAnimationFrame(() => {
     stream.scrollTop = stream.scrollHeight;
@@ -211,53 +149,48 @@ function scrollToEnd() {
 
 function setStatus(online) {
   state.ownerOnline = online;
-  const pill = $('statusPill');
-  pill.classList.toggle('online', online);
-  $('statusText').textContent = online ? `${state.ownerName} is online` : `${state.ownerName} is away`;
+  $('status').textContent = online ? ` · ${state.ownerName} online` : '';
 }
 
-function updateDocTitle() {
-  const unread = state.conversations.reduce((sum, c) => sum + (c.id === state.activeId ? 0 : c.unread || 0), 0);
-  document.title = unread > 0 ? `(${unread}) ${state.baseTitle}` : state.baseTitle;
+function updateBadge() {
+  const unread = state.conversations.reduce(
+    (n, c) => n + (c.id === state.activeId ? 0 : c.unread || 0),
+    0,
+  );
+  document.title = unread ? `(${unread}) ${state.baseTitle}` : state.baseTitle;
 }
 
-// ---------------------------------------------------------------------------
-// Data
-// ---------------------------------------------------------------------------
+// --- data ------------------------------------------------------------------
 
-async function loadConversations() {
+async function loadList() {
   const data = await api('/api/conversations');
   state.conversations = data.conversations;
-  renderThreads();
-  updateDocTitle();
+  renderList();
+  updateBadge();
 }
 
-async function openConversation(id) {
+async function open(id) {
   state.activeId = id;
-  localStorage.setItem(LAST_CHAT_KEY, id);
+  localStorage.setItem(LAST, id);
   showTyping(false);
   const data = await api(`/api/conversations/${id}`);
   state.messages = data.messages;
-  $('chatTitle').textContent = data.conversation.title || 'New chat';
-  $('chatSub').textContent = state.messages.length
-    ? `Started ${dayLabel(data.conversation.created_at)}`
-    : '';
+  $('title').firstChild.textContent = data.conversation.title || 'Chat';
   const local = state.conversations.find((c) => c.id === id);
   if (local) local.unread = 0;
-  renderThreads();
+  renderList();
   renderStream();
-  updateDocTitle();
+  updateBadge();
 }
 
-async function startConversation() {
+async function startNew() {
   const data = await api('/api/conversations', { method: 'POST' });
   state.conversations.unshift(data.conversation);
-  await openConversation(data.conversation.id);
-  $('input').focus();
+  await open(data.conversation.id);
 }
 
 async function send(text) {
-  if (!state.activeId) await startConversation();
+  if (!state.activeId) await startNew();
 
   const clientId = `c${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const optimistic = {
@@ -266,7 +199,6 @@ async function send(text) {
     role: 'user',
     body: text,
     created_at: Date.now(),
-    pending: true,
   };
   state.messages.push(optimistic);
   renderStream();
@@ -276,10 +208,10 @@ async function send(text) {
       method: 'POST',
       body: { body: text, clientId },
     });
-    const index = state.messages.findIndex((m) => m.id === optimistic.id);
-    if (index >= 0) state.messages[index] = { ...data.message, clientId };
+    const i = state.messages.findIndex((m) => m.id === optimistic.id);
+    if (i >= 0) state.messages[i] = { ...data.message, clientId };
     setStatus(Boolean(data.ownerOnline));
-    $('chatTitle').textContent = data.title;
+    $('title').firstChild.textContent = data.title;
     const local = state.conversations.find((c) => c.id === state.activeId);
     if (local) {
       local.title = data.title;
@@ -287,37 +219,30 @@ async function send(text) {
       local.updated_at = data.message.created_at;
     }
     state.conversations.sort((a, b) => b.updated_at - a.updated_at);
-    renderThreads();
+    renderList();
     renderStream();
   } catch (err) {
     state.messages = state.messages.filter((m) => m.id !== optimistic.id);
     renderStream();
-    const inner = $('streamInner');
-    const warn = document.createElement('div');
-    warn.className = 'notice notice-bad';
+    const warn = document.createElement('p');
+    warn.className = 'err';
     warn.textContent = err.message;
-    inner.appendChild(warn);
+    $('wrap').appendChild(warn);
     $('input').value = text;
-    autosize();
-    updateSendState();
+    grow();
+    updateSend();
   }
 }
 
-// ---------------------------------------------------------------------------
-// Live updates
-// ---------------------------------------------------------------------------
+// --- live ------------------------------------------------------------------
 
-/**
- * The stream echoes back messages this tab just sent, and the echo can beat
- * the POST response. Matching on our own clientId catches it either way.
- */
-function alreadyShown(message) {
+function seen(message) {
   return state.messages.some(
     (m) => m.id === message.id || (message.clientId && m.clientId === message.clientId),
   );
 }
 
-function connectEvents() {
+function connect() {
   const source = new EventSource('/api/events');
 
   source.addEventListener('presence', (event) => {
@@ -332,7 +257,7 @@ function connectEvents() {
     showTyping(false);
 
     if (payload.conversationId === state.activeId) {
-      if (!alreadyShown(payload.message)) {
+      if (!seen(payload.message)) {
         state.messages.push(payload.message);
         renderStream();
       }
@@ -340,75 +265,55 @@ function connectEvents() {
     } else {
       const local = state.conversations.find((c) => c.id === payload.conversationId);
       if (local) {
-        // Only an answer counts as unread; our own message echoed from another
-        // tab does not.
         if (payload.message.role === 'owner') local.unread = (local.unread || 0) + 1;
         local.preview = payload.message.body.slice(0, 120);
         local.updated_at = payload.message.created_at;
         state.conversations.sort((a, b) => b.updated_at - a.updated_at);
-        renderThreads();
-        updateDocTitle();
+        renderList();
+        updateBadge();
       } else {
-        loadConversations().catch(() => {});
+        loadList().catch(() => {});
       }
     }
   });
 
   source.addEventListener('typing', (event) => {
-    const payload = JSON.parse(event.data);
-    if (payload.conversationId !== state.activeId) return;
+    if (JSON.parse(event.data).conversationId !== state.activeId) return;
     showTyping(true);
     clearTimeout(state.typingTimer);
     state.typingTimer = setTimeout(() => showTyping(false), 6000);
   });
 
   source.addEventListener('removed', (event) => {
-    const payload = JSON.parse(event.data);
-    state.conversations = state.conversations.filter((c) => c.id !== payload.conversationId);
-    if (payload.conversationId === state.activeId) {
+    const { conversationId } = JSON.parse(event.data);
+    state.conversations = state.conversations.filter((c) => c.id !== conversationId);
+    if (conversationId === state.activeId) {
       state.activeId = null;
       state.messages = [];
       renderStream();
     }
-    renderThreads();
+    renderList();
   });
 
-  source.onerror = () => {
-    // EventSource reconnects on its own; refresh the list once it is back so
-    // anything missed while offline shows up.
-    setTimeout(() => loadConversations().catch(() => {}), 2500);
-  };
+  source.onerror = () => setTimeout(() => loadList().catch(() => {}), 2500);
 }
 
-function pingTyping() {
-  const now = Date.now();
-  if (!state.activeId || now - state.lastTypingPing < 3000) return;
-  state.lastTypingPing = now;
-  api(`/api/conversations/${state.activeId}/typing`, { method: 'POST' }).catch(() => {});
-}
+// --- composer --------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Composer
-// ---------------------------------------------------------------------------
-
-function autosize() {
+function grow() {
   const input = $('input');
   input.style.height = 'auto';
-  input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
+  input.style.height = `${Math.min(input.scrollHeight, 140)}px`;
 }
 
-function updateSendState() {
-  $('sendBtn').disabled = $('input').value.trim().length === 0;
+function updateSend() {
+  $('send').disabled = $('input').value.trim().length === 0;
 }
 
-function closeSidebar() {
-  $('sidebar').classList.remove('open');
-  $('scrim').classList.add('hidden');
+function closeSide() {
+  $('side').classList.remove('open');
+  $('scrim').classList.add('hide');
 }
-
-// ---------------------------------------------------------------------------
-// Wire-up
-// ---------------------------------------------------------------------------
 
 $('composer').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -416,52 +321,57 @@ $('composer').addEventListener('submit', async (event) => {
   const text = input.value.trim();
   if (!text) return;
   input.value = '';
-  autosize();
-  updateSendState();
+  grow();
+  updateSend();
   await send(text);
-  input.focus();
 });
 
 $('input').addEventListener('input', () => {
-  autosize();
-  updateSendState();
-  pingTyping();
+  grow();
+  updateSend();
+  const now = Date.now();
+  if (state.activeId && now - state.lastTyping > 3000) {
+    state.lastTyping = now;
+    api(`/api/conversations/${state.activeId}/typing`, { method: 'POST' }).catch(() => {});
+  }
 });
 
+// Enter sends on a physical keyboard. On a touch keyboard it inserts a newline
+// as people expect, and the Send button is right there.
 $('input').addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+  const touch = window.matchMedia('(pointer: coarse)').matches;
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !touch) {
     event.preventDefault();
     $('composer').requestSubmit();
   }
 });
 
-$('newChatBtn').addEventListener('click', () => {
-  closeSidebar();
-  startConversation().catch((err) => alert(err.message));
+$('newChat').addEventListener('click', () => {
+  closeSide();
+  startNew().catch((err) => alert(err.message));
 });
 
-$('signOutBtn').addEventListener('click', async () => {
-  const ok = confirm('Sign out on this device? You will need your key to get back in.');
-  if (!ok) return;
+$('menu').addEventListener('click', () => {
+  $('side').classList.add('open');
+  $('scrim').classList.remove('hide');
+});
+$('scrim').addEventListener('click', closeSide);
+$('closeSide').addEventListener('click', closeSide);
+
+$('signOut').addEventListener('click', async () => {
+  if (!confirm('Sign out on this device?')) return;
   await api('/api/auth/logout', { method: 'POST' }).catch(() => {});
-  localStorage.removeItem(LAST_CHAT_KEY);
+  localStorage.removeItem(LAST);
   location.replace('/?switch=1');
 });
 
-$('menuBtn').addEventListener('click', () => {
-  $('sidebar').classList.add('open');
-  $('scrim').classList.remove('hidden');
-});
-$('scrim').addEventListener('click', closeSidebar);
-
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && state.activeId) {
-    api(`/api/conversations/${state.activeId}/read`, { method: 'POST' }).catch(() => {});
-    loadConversations().catch(() => {});
-  }
+  if (document.hidden || !state.activeId) return;
+  api(`/api/conversations/${state.activeId}/read`, { method: 'POST' }).catch(() => {});
+  loadList().catch(() => {});
 });
 
-// ---------------------------------------------------------------------------
+// --- start -----------------------------------------------------------------
 
 (async function start() {
   let me;
@@ -472,23 +382,32 @@ document.addEventListener('visibilitychange', () => {
     return;
   }
 
-  state.user = me.user;
   state.ownerName = me.ownerName || 'Reece';
   state.baseTitle = `Chat with ${state.ownerName}`;
   document.title = state.baseTitle;
-  $('whoami').textContent = me.user.displayName ? `Hi, ${me.user.displayName}` : 'Signed in with your key';
-  $('input').placeholder = `Ask ${state.ownerName} a question…`;
+  $('who').textContent = me.user.username;
+  $('input').placeholder = `Ask ${state.ownerName} a question`;
   setStatus(Boolean(me.ownerOnline));
 
-  await loadConversations();
+  // Only offer notifications to someone who has not already got them.
+  if (!me.pushEnabled || (supported() && permission() !== 'granted')) {
+    mountBanner({
+      bar: $('notifyBar'),
+      button: $('notifyBtn'),
+      text: $('notifyText'),
+      subscribeUrl: '/api/push/subscribe',
+      message: `Get notified when ${state.ownerName} replies.`,
+      storageKey: 'chatreece:notify-asked',
+    });
+  }
 
-  const remembered = localStorage.getItem(LAST_CHAT_KEY);
-  const target =
-    state.conversations.find((c) => c.id === remembered) || state.conversations[0];
-  if (target) await openConversation(target.id);
-  else await startConversation();
+  await loadList();
 
-  connectEvents();
-  updateSendState();
-  $('input').focus();
+  const wanted = new URLSearchParams(location.search).get('c') || localStorage.getItem(LAST);
+  const target = state.conversations.find((c) => c.id === wanted) || state.conversations[0];
+  if (target) await open(target.id);
+  else await startNew();
+
+  connect();
+  updateSend();
 })();

@@ -1,4 +1,5 @@
 import { api, formatBody, timeLabel, dayLabel, relativeLabel } from './api.js';
+import { mountBanner, permission, supported } from './notify.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -6,187 +7,148 @@ const state = {
   ownerName: 'Reece',
   conversations: [],
   activeId: null,
-  activeUser: null,
+  person: null,
   messages: [],
   waitingOnly: false,
-  lastTypingPing: 0,
-  typingTimer: null,
-  sentClientIds: new Set(),
+  lastTyping: 0,
+  sent: new Set(),
 };
 
-// ---------------------------------------------------------------------------
-// Gate
-// ---------------------------------------------------------------------------
-
-function notice(target, message, kind = 'bad') {
-  target.innerHTML = '';
-  if (!message) return;
-  const div = document.createElement('div');
-  div.className = `notice notice-${kind}`;
-  div.textContent = message;
-  target.appendChild(div);
+function note(el, message, bad) {
+  el.textContent = message || '';
+  el.className = bad ? 'err' : 'ok';
+  el.classList.toggle('hide', !message);
 }
+
+// --- gate ------------------------------------------------------------------
 
 $('gateForm').addEventListener('submit', async (event) => {
   event.preventDefault();
-  notice($('gateNotice'), '');
+  note($('gateErr'), '', true);
   try {
-    const data = await api('/api/auth/login', {
-      method: 'POST',
-      body: { key: $('gateKey').value },
-    });
-    if (!data.owner) {
-      notice($('gateNotice'), 'That is a visitor key. Use /chat to open that conversation.');
-      return;
-    }
+    await api('/api/auth/owner', { method: 'POST', body: { key: $('gateKey').value } });
     location.reload();
   } catch (err) {
-    notice($('gateNotice'), err.message);
+    note($('gateErr'), err.message, true);
   }
 });
 
-// ---------------------------------------------------------------------------
-// Inbox
-// ---------------------------------------------------------------------------
+// --- inbox -----------------------------------------------------------------
 
-function visibleConversations() {
+function visible() {
   return state.waitingOnly ? state.conversations.filter((c) => c.unread > 0) : state.conversations;
 }
 
-function renderInbox() {
-  const list = $('inboxList');
-  list.innerHTML = '';
+function renderList() {
+  const list = $('list');
+  list.textContent = '';
+  const rows = visible();
 
-  const rows = visibleConversations();
   if (rows.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'fine';
-    empty.style.padding = '20px 12px';
-    empty.textContent = state.waitingOnly ? 'Nothing waiting. Nice.' : 'No questions yet.';
-    list.appendChild(empty);
+    const blank = document.createElement('div');
+    blank.className = 'blank tight';
+    blank.textContent = state.waitingOnly ? 'Nothing waiting.' : 'No questions yet.';
+    list.appendChild(blank);
   }
 
-  for (const conversation of rows) {
-    const button = document.createElement('button');
-    button.className = `thread${conversation.id === state.activeId ? ' active' : ''}`;
-    button.type = 'button';
+  for (const c of rows) {
+    const item = document.createElement('button');
+    item.className = 'item';
+    item.type = 'button';
+    if (c.id === state.activeId) item.setAttribute('aria-current', 'true');
 
     const title = document.createElement('div');
-    title.className = 'thread-title';
-    title.appendChild(
-      document.createTextNode(conversation.display_name || conversation.title || 'Visitor'),
-    );
-    if (conversation.unread > 0) {
+    title.className = 't';
+    if (c.unread > 0) {
       const badge = document.createElement('span');
-      badge.className = 'badge';
-      badge.textContent = String(conversation.unread);
+      badge.className = 'count';
+      badge.textContent = String(c.unread);
       title.appendChild(badge);
     }
-    button.appendChild(title);
+    title.append(c.username || 'Someone');
+    item.appendChild(title);
 
     const preview = document.createElement('div');
-    preview.className = 'thread-preview';
-    const speaker = conversation.last_role === 'owner' ? 'You: ' : '';
-    preview.textContent = `${speaker}${conversation.last_body || conversation.title || ''}`;
-    button.appendChild(preview);
+    preview.className = 'p';
+    preview.textContent = `${c.last_role === 'owner' ? 'You: ' : ''}${c.last_body || c.title || ''}`;
+    item.appendChild(preview);
 
     const meta = document.createElement('div');
-    meta.className = 'thread-meta';
-    const left = document.createElement('span');
-    left.textContent = relativeLabel(conversation.updated_at);
-    const right = document.createElement('span');
-    if (conversation.blocked) {
-      right.textContent = 'blocked';
-      right.style.color = 'var(--bad)';
-    } else if (conversation.last_role === 'user') {
-      right.textContent = 'needs a reply';
-      right.style.color = 'var(--warn)';
-    }
-    meta.appendChild(left);
-    meta.appendChild(right);
-    button.appendChild(meta);
+    meta.className = 'm';
+    meta.textContent = relativeLabel(c.updated_at);
+    if (c.blocked) meta.textContent += ' · blocked';
+    else if (c.last_role === 'user') meta.textContent += ' · needs a reply';
+    item.appendChild(meta);
 
-    button.addEventListener('click', () => {
+    item.addEventListener('click', () => {
       closePanels();
-      openConversation(conversation.id);
+      open(c.id);
     });
-    list.appendChild(button);
+    list.appendChild(item);
   }
 
-  const unread = state.conversations.reduce((sum, c) => sum + (c.unread || 0), 0);
-  $('inboxSummary').textContent = unread ? `${unread} waiting on you` : 'All caught up';
-  $('deskStats').textContent = `${state.conversations.length} conversation${
-    state.conversations.length === 1 ? '' : 's'
-  }`;
+  const unread = state.conversations.reduce((n, c) => n + (c.unread || 0), 0);
+  $('stats').textContent = unread ? `${unread} waiting` : `${state.conversations.length} total`;
   document.title = unread ? `(${unread}) Answering desk` : 'Answering desk';
 }
 
 async function loadInbox() {
   const data = await api('/api/owner/inbox');
   state.conversations = data.conversations;
-  renderInbox();
+  renderList();
 }
 
-// ---------------------------------------------------------------------------
-// Conversation
-// ---------------------------------------------------------------------------
+// --- conversation ----------------------------------------------------------
 
-function messageNode(message) {
-  // The owner sits where the AI sits in a normal chatbot: left side, brand
-  // avatar. The visitor's own messages stay on the right.
-  const wrap = document.createElement('div');
-  wrap.className = `msg ${message.role === 'user' ? 'from-user' : 'from-owner'}`;
+function messageNode(m) {
+  // The owner sits where a bot's answer would sit; the visitor's own messages
+  // stay on the right, same as they see it.
+  const row = document.createElement('div');
+  row.className = `msg${m.role === 'user' ? ' mine' : ''}`;
 
-  const avatar = document.createElement('div');
-  avatar.className = `avatar ${message.role === 'user' ? 'user' : 'owner'}`;
-  avatar.textContent =
-    message.role === 'user'
-      ? (state.activeUser?.displayName || 'V').slice(0, 1).toUpperCase()
-      : state.ownerName.slice(0, 1).toUpperCase();
+  const from = document.createElement('div');
+  from.className = 'from';
+  const who = m.role === 'user' ? state.person?.username || 'Them' : 'You';
+  from.textContent = `${who} · ${timeLabel(m.created_at)}`;
 
-  const stack = document.createElement('div');
-  stack.className = 'stack';
+  const body = document.createElement('div');
+  body.className = 'body';
+  body.innerHTML = formatBody(m.body);
 
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  bubble.innerHTML = formatBody(message.body);
-
-  const time = document.createElement('div');
-  time.className = 'msg-time';
-  const who = message.role === 'user' ? state.activeUser?.displayName || 'Visitor' : 'You';
-  time.textContent = `${who} · ${timeLabel(message.created_at)}`;
-
-  stack.appendChild(bubble);
-  stack.appendChild(time);
-  wrap.appendChild(avatar);
-  wrap.appendChild(stack);
-  return wrap;
+  row.appendChild(from);
+  row.appendChild(body);
+  return row;
 }
 
 function renderStream() {
-  const inner = $('streamInner');
-  inner.innerHTML = '';
+  const wrap = $('wrap');
+  wrap.textContent = '';
 
   if (!state.activeId) {
-    const box = document.createElement('div');
-    box.className = 'empty-state';
-    box.innerHTML =
-      '<h2>Your answering desk</h2><p>Questions from your site land in the list on the left. Open one and reply whenever you like — they see your answer where a bot reply would normally appear.</p>';
-    inner.appendChild(box);
+    const blank = document.createElement('div');
+    blank.className = 'blank';
+    const h = document.createElement('h2');
+    h.textContent = 'Your answering desk';
+    const p = document.createElement('p');
+    p.textContent =
+      'Questions from your site arrive in the list. Open one and reply whenever you like.';
+    blank.appendChild(h);
+    blank.appendChild(p);
+    wrap.appendChild(blank);
     return;
   }
 
-  let lastDay = '';
-  for (const message of state.messages) {
-    const day = dayLabel(message.created_at);
-    if (day !== lastDay) {
+  let day = '';
+  for (const m of state.messages) {
+    const label = dayLabel(m.created_at);
+    if (label !== day) {
       const sep = document.createElement('div');
-      sep.className = 'day-sep';
-      sep.textContent = day;
-      inner.appendChild(sep);
-      lastDay = day;
+      sep.className = 'day';
+      sep.textContent = label;
+      wrap.appendChild(sep);
+      day = label;
     }
-    inner.appendChild(messageNode(message));
+    wrap.appendChild(messageNode(m));
   }
 
   const stream = $('stream');
@@ -195,34 +157,28 @@ function renderStream() {
   });
 }
 
-async function openConversation(id) {
+async function open(id) {
   state.activeId = id;
   const data = await api(`/api/owner/conversations/${id}`);
   state.messages = data.messages;
-  state.activeUser = data.user;
+  state.person = data.user;
 
-  $('threadTitle').textContent = data.conversation.title || 'Conversation';
-  delete $('threadSub').dataset.base;
-  $('threadSub').textContent = `${data.user?.displayName || 'Anonymous visitor'} · started ${dayLabel(
-    data.conversation.created_at,
-  )}`;
-  $('visitorName').textContent = data.user?.displayName || 'Anonymous visitor';
-  $('visitorMeta').textContent = data.user
-    ? `First seen ${dayLabel(data.user.createdAt)} · last active ${relativeLabel(data.user.lastSeenAt)}`
-    : '';
-  $('noteBox').value = data.user?.note || '';
-  $('blockBtn').textContent = data.user?.blocked ? 'Unblock this key' : 'Block this key';
+  $('title').firstChild.textContent = data.user?.username || 'Conversation';
+  $('sub').textContent = ` · ${data.conversation.title || ''}`.slice(0, 60);
+  $('panelWho').textContent = data.user?.username || 'this person';
+  $('note').value = data.user?.note || '';
+  $('block').textContent = data.user?.blocked ? 'Unblock' : 'Block';
 
   const local = state.conversations.find((c) => c.id === id);
   if (local) local.unread = 0;
-  renderInbox();
+  renderList();
   renderStream();
-  $('input').focus();
+  $('send').disabled = $('input').value.trim().length === 0;
 }
 
 async function reply(text) {
   const clientId = `o${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  state.sentClientIds.add(clientId);
+  state.sent.add(clientId);
   const optimistic = {
     id: `pending-${clientId}`,
     clientId,
@@ -238,8 +194,8 @@ async function reply(text) {
       method: 'POST',
       body: { body: text, clientId },
     });
-    const index = state.messages.findIndex((m) => m.id === optimistic.id);
-    if (index >= 0) state.messages[index] = data.message;
+    const i = state.messages.findIndex((m) => m.id === optimistic.id);
+    if (i >= 0) state.messages[i] = { ...data.message, clientId };
     const local = state.conversations.find((c) => c.id === state.activeId);
     if (local) {
       local.last_body = text.slice(0, 120);
@@ -248,7 +204,7 @@ async function reply(text) {
       local.unread = 0;
     }
     state.conversations.sort((a, b) => b.updated_at - a.updated_at);
-    renderInbox();
+    renderList();
     renderStream();
   } catch (err) {
     state.messages = state.messages.filter((m) => m.id !== optimistic.id);
@@ -258,23 +214,18 @@ async function reply(text) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Live updates
-// ---------------------------------------------------------------------------
+// --- live ------------------------------------------------------------------
 
-function connectEvents() {
+function connect() {
   const source = new EventSource('/api/owner/events');
 
   source.addEventListener('message', (event) => {
-    const payload = JSON.parse(event.data);
-    const message = payload.message;
+    const { conversationId, message } = JSON.parse(event.data);
+    // Our own reply, already on screen. Replies from another desk tab are not,
+    // so match on the id we generated rather than on the role.
+    if (message.clientId && state.sent.has(message.clientId)) return;
 
-    // Replies sent from this tab are already on screen. Replies from another
-    // desk tab are not, so match on clientId rather than skipping every
-    // owner-authored message.
-    if (message.clientId && state.sentClientIds.has(message.clientId)) return;
-
-    if (payload.conversationId === state.activeId) {
+    if (conversationId === state.activeId) {
       if (!state.messages.some((m) => m.id === message.id)) {
         state.messages.push(message);
         renderStream();
@@ -288,47 +239,27 @@ function connectEvents() {
         local.last_role = message.role;
         local.updated_at = message.created_at;
       }
-      renderInbox();
+      renderList();
     } else {
       loadInbox().catch(() => {});
     }
   });
 
-  source.addEventListener('typing', (event) => {
-    // Nice to know someone is mid-sentence, but it should not steal focus.
-    const payload = JSON.parse(event.data);
-    if (payload.conversationId !== state.activeId) return;
-    const sub = $('threadSub');
-    if (!sub.dataset.base) sub.dataset.base = sub.textContent;
-    sub.textContent = 'typing…';
-    clearTimeout(state.typingTimer);
-    state.typingTimer = setTimeout(() => {
-      sub.textContent = sub.dataset.base || '';
-      delete sub.dataset.base;
-    }, 5000);
-  });
-
-  source.addEventListener('conversation', () => loadInbox().catch(() => {}));
-  source.addEventListener('user', () => loadInbox().catch(() => {}));
   source.addEventListener('removed', () => loadInbox().catch(() => {}));
-
   source.onerror = () => setTimeout(() => loadInbox().catch(() => {}), 2500);
 }
 
-// ---------------------------------------------------------------------------
-// Composer + rail actions
-// ---------------------------------------------------------------------------
+// --- interaction -----------------------------------------------------------
 
-function autosize() {
+function grow() {
   const input = $('input');
   input.style.height = 'auto';
-  input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
+  input.style.height = `${Math.min(input.scrollHeight, 140)}px`;
 }
 
 function closePanels() {
-  $('sidebar').classList.remove('open');
-  $('rail').classList.remove('open');
-  $('scrim').classList.add('hidden');
+  $('side').classList.remove('open');
+  $('scrim').classList.add('hide');
 }
 
 $('composer').addEventListener('submit', async (event) => {
@@ -337,118 +268,130 @@ $('composer').addEventListener('submit', async (event) => {
   const text = $('input').value.trim();
   if (!text) return;
   $('input').value = '';
-  autosize();
-  $('sendBtn').disabled = true;
+  grow();
+  $('send').disabled = true;
   await reply(text);
-  $('input').focus();
 });
 
 $('input').addEventListener('input', () => {
-  autosize();
-  $('sendBtn').disabled = $('input').value.trim().length === 0 || !state.activeId;
+  grow();
+  $('send').disabled = $('input').value.trim().length === 0 || !state.activeId;
   const now = Date.now();
-  if (state.activeId && now - state.lastTypingPing > 3000) {
-    state.lastTypingPing = now;
+  if (state.activeId && now - state.lastTyping > 3000) {
+    state.lastTyping = now;
     api(`/api/owner/conversations/${state.activeId}/typing`, { method: 'POST' }).catch(() => {});
   }
 });
 
 $('input').addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+  const touch = window.matchMedia('(pointer: coarse)').matches;
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !touch) {
     event.preventDefault();
     $('composer').requestSubmit();
   }
 });
 
-$('filterBtn').addEventListener('click', () => {
+$('filter').addEventListener('click', () => {
   state.waitingOnly = !state.waitingOnly;
-  $('filterBtn').textContent = state.waitingOnly ? 'Waiting' : 'All';
-  renderInbox();
+  $('filter').textContent = state.waitingOnly ? 'Showing waiting' : 'Showing all';
+  renderList();
 });
 
-$('saveNoteBtn').addEventListener('click', async () => {
-  if (!state.activeUser) return;
+$('info').addEventListener('click', () => {
+  if (!state.activeId) return;
+  $('panel').classList.toggle('hide');
+});
+
+$('saveNote').addEventListener('click', async () => {
+  if (!state.person) return;
   try {
-    await api(`/api/owner/users/${state.activeUser.id}`, {
+    await api(`/api/owner/users/${state.person.id}`, {
       method: 'PATCH',
-      body: { note: $('noteBox').value },
+      body: { note: $('note').value },
     });
-    notice($('noteNotice'), 'Saved.', 'good');
-    setTimeout(() => notice($('noteNotice'), ''), 2000);
+    note($('panelMsg'), 'Saved.');
+    setTimeout(() => note($('panelMsg'), ''), 1800);
   } catch (err) {
-    notice($('noteNotice'), err.message);
+    note($('panelMsg'), err.message, true);
   }
 });
 
-$('blockBtn').addEventListener('click', async () => {
-  if (!state.activeUser) return;
-  const blocking = !state.activeUser.blocked;
-  const ok = confirm(
-    blocking
-      ? 'Block this key? Their key stops working and they cannot send anything else.'
-      : 'Unblock this key?',
-  );
-  if (!ok) return;
-  const data = await api(`/api/owner/users/${state.activeUser.id}`, {
+$('block').addEventListener('click', async () => {
+  if (!state.person) return;
+  const blocking = !state.person.blocked;
+  if (!confirm(blocking ? 'Block this person from sending anything else?' : 'Unblock?')) return;
+  const data = await api(`/api/owner/users/${state.person.id}`, {
     method: 'PATCH',
     body: { blocked: blocking },
   });
-  state.activeUser = { ...state.activeUser, ...data.user };
-  $('blockBtn').textContent = state.activeUser.blocked ? 'Unblock this key' : 'Block this key';
+  state.person = { ...state.person, ...data.user };
+  $('block').textContent = state.person.blocked ? 'Unblock' : 'Block';
   loadInbox().catch(() => {});
 });
 
-$('deleteBtn').addEventListener('click', async () => {
+$('del').addEventListener('click', async () => {
   if (!state.activeId) return;
   if (!confirm('Delete this conversation for both of you? This cannot be undone.')) return;
   await api(`/api/owner/conversations/${state.activeId}`, { method: 'DELETE' });
   state.activeId = null;
   state.messages = [];
-  state.activeUser = null;
-  $('threadTitle').textContent = 'Pick a conversation';
-  $('threadSub').textContent = '';
+  state.person = null;
+  $('title').firstChild.textContent = 'Pick a question';
+  $('sub').textContent = '';
+  $('panel').classList.add('hide');
   renderStream();
   loadInbox().catch(() => {});
 });
 
-$('signOutBtn').addEventListener('click', async () => {
+$('menu').addEventListener('click', () => {
+  $('side').classList.add('open');
+  $('scrim').classList.remove('hide');
+});
+$('scrim').addEventListener('click', closePanels);
+$('closeSide').addEventListener('click', closePanels);
+
+$('signOut').addEventListener('click', async () => {
   await api('/api/auth/logout', { method: 'POST' }).catch(() => {});
   location.reload();
 });
-
-$('menuBtn').addEventListener('click', () => {
-  $('sidebar').classList.add('open');
-  $('scrim').classList.remove('hidden');
-});
-$('railBtn').addEventListener('click', () => {
-  $('rail').classList.add('open');
-  $('scrim').classList.remove('hidden');
-});
-$('scrim').addEventListener('click', closePanels);
 
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) loadInbox().catch(() => {});
 });
 
-// ---------------------------------------------------------------------------
+// --- start -----------------------------------------------------------------
 
 (async function start() {
+  let me;
   try {
-    const me = await api('/api/owner/me');
-    state.ownerName = me.ownerName || 'Reece';
+    me = await api('/api/owner/me');
   } catch {
-    $('gate').classList.remove('hidden');
-    $('gateKey').focus();
+    $('gate').classList.remove('hide');
     return;
   }
 
-  $('gate').classList.add('hidden');
-  $('desk').classList.remove('hidden');
+  state.ownerName = me.ownerName || 'Reece';
+  $('desk').classList.remove('hide');
+
+  if (!me.pushEnabled || (supported() && permission() !== 'granted')) {
+    mountBanner({
+      bar: $('notifyBar'),
+      button: $('notifyBtn'),
+      text: $('notifyText'),
+      subscribeUrl: '/api/owner/push/subscribe',
+      message: 'Get notified when a question comes in.',
+      storageKey: 'chatreece:owner-notify-asked',
+    });
+  }
 
   await loadInbox();
   renderStream();
-  connectEvents();
+  connect();
 
-  const first = state.conversations.find((c) => c.unread > 0) || state.conversations[0];
-  if (first) await openConversation(first.id);
+  const wanted = new URLSearchParams(location.search).get('c');
+  const first =
+    state.conversations.find((c) => c.id === wanted) ||
+    state.conversations.find((c) => c.unread > 0) ||
+    state.conversations[0];
+  if (first) await open(first.id);
 })();

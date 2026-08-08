@@ -13,16 +13,55 @@ db.exec('PRAGMA journal_mode = WAL');
 db.exec('PRAGMA foreign_keys = ON');
 db.exec('PRAGMA busy_timeout = 5000');
 
+// ---------------------------------------------------------------------------
+// Migration off the original passkey scheme
+//
+// The first version of this app identified people by a generated key with no
+// username. Those rows cannot be carried into username/password accounts —
+// there is no username to assign and no password to derive. Rather than
+// deleting anything, the old tables are set aside under a _legacy_keyauth
+// suffix so the data is still there to inspect.
+// ---------------------------------------------------------------------------
+
+function tableExists(name) {
+  return Boolean(
+    db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?").get(name),
+  );
+}
+
+function columnNames(table) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+}
+
+if (tableExists('users') && !columnNames('users').includes('username')) {
+  const carried = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
+  console.warn(
+    `[migration] Found ${carried} account(s) from the old passkey scheme. ` +
+      'Those tables are being renamed with a _legacy_keyauth suffix; ' +
+      'people will need to sign up with a username and password.',
+  );
+  db.exec('PRAGMA foreign_keys = OFF');
+  for (const t of ['messages', 'conversations', 'sessions', 'users']) {
+    if (tableExists(t)) db.exec(`ALTER TABLE ${t} RENAME TO ${t}_legacy_keyauth`);
+  }
+  db.exec('PRAGMA foreign_keys = ON');
+}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id            TEXT PRIMARY KEY,
-    lookup_hash   TEXT NOT NULL UNIQUE,
-    key_hash      TEXT NOT NULL,
-    display_name  TEXT NOT NULL DEFAULT '',
+    username      TEXT NOT NULL,
+    username_key  TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
     note          TEXT NOT NULL DEFAULT '',
     blocked       INTEGER NOT NULL DEFAULT 0,
     created_at    INTEGER NOT NULL,
     last_seen_at  INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS sessions (
@@ -32,11 +71,6 @@ db.exec(`
     expires_at  INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-
-  CREATE TABLE IF NOT EXISTS settings (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-  );
 
   CREATE TABLE IF NOT EXISTS owner_sessions (
     token_hash  TEXT PRIMARY KEY,
@@ -64,25 +98,38 @@ db.exec(`
     created_at      INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
+
+  -- One row per browser that has agreed to receive notifications. user_id is
+  -- null for the owner's own devices.
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint   TEXT PRIMARY KEY,
+    user_id    TEXT REFERENCES users(id) ON DELETE CASCADE,
+    is_owner   INTEGER NOT NULL DEFAULT 0,
+    p256dh     TEXT NOT NULL,
+    auth       TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id);
+  CREATE INDEX IF NOT EXISTS idx_push_owner ON push_subscriptions(is_owner);
 `);
 
 const now = () => Date.now();
 const newId = () => crypto.randomUUID();
 
-// node:sqlite hands back null-prototype rows. Copying them into ordinary
-// objects keeps downstream code (and JSON serialisation) unsurprising.
+// node:sqlite hands back null-prototype rows; copying them keeps downstream
+// code and JSON serialisation unsurprising.
 const plain = (row) => (row ? { ...row } : null);
 const plainAll = (rows) => rows.map((row) => ({ ...row }));
 
 const q = {
   insertUser: db.prepare(`
-    INSERT INTO users (id, lookup_hash, key_hash, display_name, created_at, last_seen_at)
+    INSERT INTO users (id, username, username_key, password_hash, created_at, last_seen_at)
     VALUES (?, ?, ?, ?, ?, ?)
   `),
-  userByLookup: db.prepare('SELECT * FROM users WHERE lookup_hash = ?'),
+  userByUsername: db.prepare('SELECT * FROM users WHERE username_key = ?'),
   userById: db.prepare('SELECT * FROM users WHERE id = ?'),
   touchUser: db.prepare('UPDATE users SET last_seen_at = ? WHERE id = ?'),
-  setDisplayName: db.prepare('UPDATE users SET display_name = ? WHERE id = ?'),
+  setPassword: db.prepare('UPDATE users SET password_hash = ? WHERE id = ?'),
   setNote: db.prepare('UPDATE users SET note = ? WHERE id = ?'),
   setBlocked: db.prepare('UPDATE users SET blocked = ? WHERE id = ?'),
   countUsers: db.prepare('SELECT COUNT(*) AS n FROM users'),
@@ -107,9 +154,9 @@ const q = {
     VALUES (?, ?, ?, ?, ?, 0, ?)
   `),
   conversationById: db.prepare('SELECT * FROM conversations WHERE id = ?'),
-  conversationsForUser: db.prepare(`
-    SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC
-  `),
+  conversationsForUser: db.prepare(
+    'SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC',
+  ),
   setTitle: db.prepare('UPDATE conversations SET title = ? WHERE id = ?'),
   touchConversation: db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?'),
   markAdminRead: db.prepare('UPDATE conversations SET admin_read_at = ? WHERE id = ?'),
@@ -124,27 +171,39 @@ const q = {
     WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC
   `),
   messageCount: db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?'),
-  recentUserMessageCount: db.prepare(`
-    SELECT COUNT(*) AS n FROM messages m
-    JOIN conversations c ON c.id = m.conversation_id
-    WHERE c.user_id = ? AND m.role = 'user' AND m.created_at > ?
+  lastMessage: db.prepare(`
+    SELECT body, role FROM messages WHERE conversation_id = ?
+    ORDER BY created_at DESC, rowid DESC LIMIT 1
   `),
+  unreadForUser: db.prepare(`
+    SELECT COUNT(*) AS n FROM messages
+    WHERE conversation_id = ? AND role = 'owner' AND created_at > ?
+  `),
+
+  insertPush: db.prepare(`
+    INSERT INTO push_subscriptions (endpoint, user_id, is_owner, p256dh, auth, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(endpoint) DO UPDATE SET
+      user_id = excluded.user_id,
+      is_owner = excluded.is_owner,
+      p256dh = excluded.p256dh,
+      auth = excluded.auth
+  `),
+  pushForUser: db.prepare('SELECT * FROM push_subscriptions WHERE user_id = ?'),
+  pushForOwner: db.prepare('SELECT * FROM push_subscriptions WHERE is_owner = 1'),
+  deletePush: db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?'),
+  countPushForUser: db.prepare(
+    'SELECT COUNT(*) AS n FROM push_subscriptions WHERE user_id = ?',
+  ),
+  countPushForOwner: db.prepare(
+    'SELECT COUNT(*) AS n FROM push_subscriptions WHERE is_owner = 1',
+  ),
 };
 
-// The admin inbox needs a row per conversation with the visitor attached and a
-// preview of the latest message, sorted so the things waiting on an answer
-// float to the top.
 const adminInboxStmt = db.prepare(`
   SELECT
-    c.id,
-    c.title,
-    c.user_id,
-    c.created_at,
-    c.updated_at,
-    c.admin_read_at,
-    u.display_name,
-    u.blocked,
-    u.note,
+    c.id, c.title, c.user_id, c.created_at, c.updated_at, c.admin_read_at,
+    u.username, u.blocked, u.note,
     (SELECT body FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC, rowid DESC LIMIT 1) AS last_body,
     (SELECT role FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC, rowid DESC LIMIT 1) AS last_role,
     (SELECT COUNT(*) FROM messages
@@ -175,15 +234,17 @@ const store = {
     setSettingStmt.run(key, String(value));
   },
 
-  createUser({ lookupHash, keyHash, displayName }) {
+  // -- users ---------------------------------------------------------------
+
+  createUser({ username, usernameKey, passwordHash }) {
     const id = newId();
     const ts = now();
-    q.insertUser.run(id, lookupHash, keyHash, displayName || '', ts, ts);
+    q.insertUser.run(id, username, usernameKey, passwordHash, ts, ts);
     return plain(q.userById.get(id));
   },
 
-  findUserByLookup(lookupHash) {
-    return plain(q.userByLookup.get(lookupHash));
+  findUserByUsername(usernameKey) {
+    return plain(q.userByUsername.get(usernameKey));
   },
 
   getUser(id) {
@@ -194,8 +255,8 @@ const store = {
     q.touchUser.run(now(), id);
   },
 
-  setDisplayName(id, name) {
-    q.setDisplayName.run(name, id);
+  setPassword(id, passwordHash) {
+    q.setPassword.run(passwordHash, id);
   },
 
   setNote(id, note) {
@@ -209,6 +270,8 @@ const store = {
   countUsers() {
     return q.countUsers.get().n;
   },
+
+  // -- sessions ------------------------------------------------------------
 
   createSession(userId, tokenHash, ttlMs) {
     const ts = now();
@@ -255,10 +318,11 @@ const store = {
     q.deleteOwnerSession.run(tokenHash);
   },
 
-  /** Used when the admin key changes, so old browsers stop counting as the owner. */
   destroyAllOwnerSessions() {
     q.deleteAllOwnerSessions.run();
   },
+
+  // -- conversations -------------------------------------------------------
 
   createConversation(userId, title = 'New chat') {
     const id = newId();
@@ -272,26 +336,14 @@ const store = {
   },
 
   listConversations(userId) {
-    return plainAll(q.conversationsForUser.all(userId)).map((c) => ({
-      ...c,
-      unread: db
-        .prepare(
-          `SELECT COUNT(*) AS n FROM messages
-           WHERE conversation_id = ? AND role = 'owner' AND created_at > ?`,
-        )
-        .get(c.id, c.user_read_at).n,
-      preview: this.previewOf(c.id),
-    }));
-  },
-
-  previewOf(conversationId) {
-    const row = db
-      .prepare(
-        `SELECT body FROM messages WHERE conversation_id = ?
-         ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-      )
-      .get(conversationId);
-    return row ? String(row.body).slice(0, 120) : '';
+    return plainAll(q.conversationsForUser.all(userId)).map((c) => {
+      const last = q.lastMessage.get(c.id);
+      return {
+        ...c,
+        unread: q.unreadForUser.get(c.id, c.user_read_at).n,
+        preview: last ? String(last.body).slice(0, 120) : '',
+      };
+    });
   },
 
   setTitle(id, title) {
@@ -307,7 +359,7 @@ const store = {
     const ts = now();
     q.insertMessage.run(id, conversationId, role, body, ts);
     q.touchConversation.run(ts, conversationId);
-    // Whoever just spoke has by definition seen everything up to this point.
+    // Whoever just spoke has by definition seen everything before it.
     if (role === 'user') q.markUserRead.run(ts, conversationId);
     else q.markAdminRead.run(ts, conversationId);
     return { id, role, body, created_at: ts };
@@ -321,10 +373,6 @@ const store = {
     return q.messageCount.get(conversationId).n;
   },
 
-  recentUserMessageCount(userId, sinceMs) {
-    return q.recentUserMessageCount.get(userId, now() - sinceMs).n;
-  },
-
   markAdminRead(id) {
     q.markAdminRead.run(now(), id);
   },
@@ -333,7 +381,7 @@ const store = {
     q.markUserRead.run(now(), id);
   },
 
-  adminInbox(limit = 200) {
+  adminInbox(limit = 300) {
     return plainAll(adminInboxStmt.all(limit));
   },
 
@@ -345,6 +393,32 @@ const store = {
          WHERE m.role = 'user' AND m.created_at > c.admin_read_at`,
       )
       .get().n;
+  },
+
+  // -- push ----------------------------------------------------------------
+
+  savePushSubscription({ endpoint, userId, isOwner, p256dh, auth }) {
+    q.insertPush.run(endpoint, userId || null, isOwner ? 1 : 0, p256dh, auth, now());
+  },
+
+  pushSubscriptionsForUser(userId) {
+    return plainAll(q.pushForUser.all(userId));
+  },
+
+  pushSubscriptionsForOwner() {
+    return plainAll(q.pushForOwner.all());
+  },
+
+  deletePushSubscription(endpoint) {
+    q.deletePush.run(endpoint);
+  },
+
+  hasPushForUser(userId) {
+    return q.countPushForUser.get(userId).n > 0;
+  },
+
+  hasPushForOwner() {
+    return q.countPushForOwner.get().n > 0;
   },
 };
 

@@ -19,7 +19,7 @@
   var origin = new URL(script.src, location.href).origin;
   var label = script.getAttribute('data-label') || 'Ask a question';
   var position = script.getAttribute('data-position') === 'left' ? 'left' : 'right';
-  var accent = script.getAttribute('data-accent') || '#6f8cff';
+  var accent = script.getAttribute('data-accent') || '#1a4fd0';
   var startOpen = script.getAttribute('data-open') === '1';
 
   var host = document.createElement('div');
@@ -42,7 +42,7 @@
     '.panel{position:fixed;bottom:88px;' + position + ':20px;width:390px;height:min(620px,calc(100vh - 120px));',
     // No background here: the iframe paints its own, and a colour underneath
     // would show as a mismatched ring at the rounded corners in light mode.
-    'border-radius:16px;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.28);',
+    'border-radius:8px;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.28);',
     'display:none;flex-direction:column}',
     '.panel.open{display:flex}',
     '.panel iframe{border:0;width:100%;height:100%;display:block}',

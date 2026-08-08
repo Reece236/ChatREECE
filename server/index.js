@@ -14,22 +14,25 @@ try {
 const express = require('express');
 const store = require('./db');
 const events = require('./events');
+const push = require('./push');
 const {
-  KEY_DIGITS,
-  SESSION_DAYS,
+  PASSWORD_MIN,
   RateLimiter,
+  SESSION_DAYS,
   clearSessionCookie,
   generateKey,
-  hashKey,
-  keyspaceSize,
+  hashPassword,
   loadPepper,
-  lookupHash,
   newSessionToken,
   normalizeKey,
+  normalizeUsername,
   parseCookies,
   setSessionCookie,
   tokenHash,
-  verifyKey,
+  validatePassword,
+  validateUsername,
+  verifyPassword,
+  wasteTime,
 } = require('./auth');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -46,7 +49,6 @@ const VISITOR_COOKIE = 'cr_sid';
 const OWNER_COOKIE = 'cr_owner';
 const SESSION_TTL_MS = SESSION_DAYS * 24 * 60 * 60 * 1000;
 const MAX_MESSAGE_CHARS = 4000;
-const MAX_NAME_CHARS = 40;
 
 const PEPPER = loadPepper(store.DATA_DIR);
 
@@ -63,18 +65,18 @@ function resolveOwnerKey() {
     const saved = fs.readFileSync(file, 'utf8').trim();
     if (saved) return { key: saved, generated: true };
   }
-  // Four parts instead of the visitors' three: this one key opens every
-  // conversation on the site, so it earns the extra word.
-  const key = `${generateKey()}-${generateKey().split('-')[1]}`;
+  const key = generateKey(3);
   fs.writeFileSync(file, `${key}\n`, { mode: 0o600 });
   return { key, generated: true };
 }
 
 const owner = resolveOwnerKey();
 const OWNER_KEY_NORMALIZED = normalizeKey(owner.key);
-const OWNER_KEY_HASH = crypto.createHmac('sha256', PEPPER).update(OWNER_KEY_NORMALIZED).digest('hex');
+const OWNER_KEY_HASH = crypto
+  .createHmac('sha256', PEPPER)
+  .update(OWNER_KEY_NORMALIZED)
+  .digest('hex');
 
-// If the owner key changed since last boot, old owner cookies must stop working.
 if (store.getSetting('owner_key_hash') !== OWNER_KEY_HASH) {
   store.destroyAllOwnerSessions();
   store.setSetting('owner_key_hash', OWNER_KEY_HASH);
@@ -105,9 +107,11 @@ app.use((req, res, next) => {
     [
       "default-src 'self'",
       "script-src 'self'",
-      "style-src 'self' 'unsafe-inline'",
+      "style-src 'self'",
       "img-src 'self' data:",
       "connect-src 'self'",
+      "worker-src 'self'",
+      "manifest-src 'self'",
       "base-uri 'none'",
       "form-action 'self'",
       `frame-ancestors ${frameAncestors}`,
@@ -122,16 +126,18 @@ const isSecure = (req) => req.secure || req.headers['x-forwarded-proto'] === 'ht
 // Rate limits
 // ---------------------------------------------------------------------------
 
-const loginLimiter = new RateLimiter({ limit: 12, windowMs: 15 * 60 * 1000 });
-const signupLimiter = new RateLimiter({ limit: 8, windowMs: 60 * 60 * 1000 });
+const loginLimiter = new RateLimiter({ limit: 10, windowMs: 15 * 60 * 1000 });
+const accountLimiter = new RateLimiter({ limit: 10, windowMs: 60 * 60 * 1000 });
+// Counts only accounts actually created, so a shared office or family NAT has
+// room to sign several people up.
+const signupLimiter = new RateLimiter({ limit: 10, windowMs: 60 * 60 * 1000 });
 const messageLimiter = new RateLimiter({ limit: 40, windowMs: 5 * 60 * 1000 });
 const conversationLimiter = new RateLimiter({ limit: 20, windowMs: 60 * 60 * 1000 });
 
 setInterval(() => {
-  loginLimiter.sweep();
-  signupLimiter.sweep();
-  messageLimiter.sweep();
-  conversationLimiter.sweep();
+  for (const l of [loginLimiter, accountLimiter, signupLimiter, messageLimiter, conversationLimiter]) {
+    l.sweep();
+  }
   store.purgeExpiredSessions();
 }, 10 * 60 * 1000).unref();
 
@@ -159,21 +165,18 @@ function currentVisitor(req) {
   return user;
 }
 
-function currentOwner(req) {
-  const token = readCookie(req, OWNER_COOKIE);
-  if (!token) return false;
-  return Boolean(store.getOwnerSession(tokenHash(token)));
-}
-
 function requireVisitor(req, res, next) {
   const user = currentVisitor(req);
-  if (!user) return res.status(401).json({ error: 'Sign in with your key to continue.' });
+  if (!user) return res.status(401).json({ error: 'Sign in to continue.' });
   req.user = user;
   next();
 }
 
 function requireOwner(req, res, next) {
-  if (!currentOwner(req)) return res.status(401).json({ error: 'Owner key required.' });
+  const token = readCookie(req, OWNER_COOKIE);
+  if (!token || !store.getOwnerSession(tokenHash(token))) {
+    return res.status(401).json({ error: 'Owner key required.' });
+  }
   next();
 }
 
@@ -184,7 +187,7 @@ function requireOwner(req, res, next) {
 function cleanText(value, max) {
   return String(value ?? '')
     .replace(/\r\n/g, '\n')
-    // Strip control characters but keep newlines and tabs.
+    // Strip control characters, keeping newlines and tabs.
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     .trim()
     .slice(0, max);
@@ -197,18 +200,18 @@ function titleFrom(body) {
 }
 
 function publicUser(user) {
-  return {
-    id: user.id,
-    displayName: user.display_name,
-    createdAt: user.created_at,
-  };
+  return { id: user.id, username: user.username, createdAt: user.created_at };
 }
 
-function notifyOwner(user, conversation, message) {
+function startSession(res, req, userId) {
+  const token = newSessionToken();
+  store.createSession(userId, tokenHash(token), SESSION_TTL_MS);
+  setSessionCookie(res, VISITOR_COOKIE, token, { secure: isSecure(req) });
+}
+
+function fireWebhook(user, conversation, message) {
   if (!NOTIFY_WEBHOOK_URL) return;
-  const who = user.display_name || 'A visitor';
-  const text = `${who} asked on ${SITE_NAME}: ${message.body.slice(0, 400)}`;
-  // Fire and forget — a broken webhook must never block someone's question.
+  const text = `${user.username} asked on ${SITE_NAME}: ${message.body.slice(0, 400)}`;
   fetch(NOTIFY_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -217,8 +220,7 @@ function notifyOwner(user, conversation, message) {
       content: text,
       site: SITE_NAME,
       conversationId: conversation.id,
-      userId: user.id,
-      displayName: user.display_name,
+      username: user.username,
       message: message.body,
     }),
   }).catch((err) => console.warn('[notify] webhook failed:', err.message));
@@ -234,82 +236,86 @@ function conversationForUser(req, res) {
 }
 
 // ---------------------------------------------------------------------------
-// Public config
+// Config
 // ---------------------------------------------------------------------------
 
 app.get('/api/config', (req, res) => {
   res.json({
     siteName: SITE_NAME,
     ownerName: OWNER_NAME,
-    keyDigits: KEY_DIGITS,
+    passwordMin: PASSWORD_MIN,
     ownerOnline: events.hasListeners(events.OWNER_CHANNEL),
   });
 });
 
 // ---------------------------------------------------------------------------
-// Auth routes
+// Accounts
 // ---------------------------------------------------------------------------
 
-app.post('/api/auth/new', (req, res) => {
-  const wait = signupLimiter.check(req.ip);
-  if (wait) return limited(res, wait, 'Too many keys made from this connection. Try again later.');
+app.post('/api/auth/signup', (req, res) => {
+  // Validation runs before the rate limit on purpose. Counting rejected
+  // attempts would mean a few fat-fingered passwords locks someone out of
+  // signing up for an hour; only accounts that actually get created count.
+  const username = validateUsername(req.body?.username);
+  if (!username.ok) return res.status(400).json({ error: username.error, field: 'username' });
 
-  const displayName = cleanText(req.body?.displayName, MAX_NAME_CHARS);
+  const password = validatePassword(req.body?.password);
+  if (!password.ok) return res.status(400).json({ error: password.error, field: 'password' });
 
-  let key = null;
-  let lookup = null;
-  for (let attempt = 0; attempt < 25; attempt += 1) {
-    const candidate = generateKey();
-    const candidateLookup = lookupHash(normalizeKey(candidate), PEPPER);
-    if (!store.findUserByLookup(candidateLookup) && !isOwnerKey(normalizeKey(candidate))) {
-      key = candidate;
-      lookup = candidateLookup;
-      break;
-    }
+  if (store.findUserByUsername(username.lookup)) {
+    return res.status(409).json({ error: 'That username is taken.', field: 'username' });
   }
-  if (!key) return res.status(503).json({ error: 'Could not make a key right now. Try again.' });
+
+  const wait = signupLimiter.check(req.ip);
+  if (wait) return limited(res, wait, 'Too many accounts from this connection. Try again later.');
 
   const user = store.createUser({
-    lookupHash: lookup,
-    keyHash: hashKey(normalizeKey(key)),
-    displayName,
+    username: username.display,
+    usernameKey: username.lookup,
+    passwordHash: hashPassword(password.password),
   });
 
-  const token = newSessionToken();
-  store.createSession(user.id, tokenHash(token), SESSION_TTL_MS);
-  setSessionCookie(res, VISITOR_COOKIE, token, { secure: isSecure(req) });
-
-  res.json({ key, user: publicUser(user) });
+  startSession(res, req, user.id);
+  res.json({ user: publicUser(user), redirect: '/chat' });
 });
 
 app.post('/api/auth/login', (req, res) => {
   const wait = loginLimiter.check(req.ip);
-  if (wait) return limited(res, wait, 'Too many tries. Wait a bit and try your key again.');
+  if (wait) return limited(res, wait, 'Too many tries. Wait a few minutes and try again.');
 
-  const normalized = normalizeKey(req.body?.key);
-  if (normalized.length < 6) return res.status(401).json({ error: 'That key does not look right.' });
+  const lookup = normalizeUsername(req.body?.username);
+  const password = String(req.body?.password || '');
 
-  if (isOwnerKey(normalized)) {
-    const token = newSessionToken();
-    store.createOwnerSession(tokenHash(token), SESSION_TTL_MS);
-    setSessionCookie(res, OWNER_COOKIE, token, { secure: isSecure(req) });
-    loginLimiter.reset(req.ip);
-    return res.json({ owner: true, redirect: '/admin' });
+  const user = lookup ? store.findUserByUsername(lookup) : null;
+  if (!user) {
+    // Spend the same time as a real check so a missing username and a wrong
+    // password are indistinguishable from the outside.
+    wasteTime(password);
+    return res.status(401).json({ error: 'Wrong username or password.' });
   }
-
-  const user = store.findUserByLookup(lookupHash(normalized, PEPPER));
-  if (!user || !verifyKey(normalized, user.key_hash)) {
-    return res.status(401).json({ error: 'No chat found for that key. Check the spelling.' });
+  if (!verifyPassword(password, user.password_hash)) {
+    return res.status(401).json({ error: 'Wrong username or password.' });
   }
-  if (user.blocked) return res.status(403).json({ error: 'This key is no longer active.' });
+  if (user.blocked) return res.status(403).json({ error: 'This account has been disabled.' });
 
   store.touchUser(user.id);
-  const token = newSessionToken();
-  store.createSession(user.id, tokenHash(token), SESSION_TTL_MS);
-  setSessionCookie(res, VISITOR_COOKIE, token, { secure: isSecure(req) });
+  startSession(res, req, user.id);
   loginLimiter.reset(req.ip);
-
   res.json({ user: publicUser(user), redirect: '/chat' });
+});
+
+app.post('/api/auth/owner', (req, res) => {
+  const wait = loginLimiter.check(req.ip);
+  if (wait) return limited(res, wait, 'Too many tries. Wait a few minutes and try again.');
+
+  if (!isOwnerKey(normalizeKey(req.body?.key))) {
+    return res.status(401).json({ error: 'That key is not right.' });
+  }
+  const token = newSessionToken();
+  store.createOwnerSession(tokenHash(token), SESSION_TTL_MS);
+  setSessionCookie(res, OWNER_COOKIE, token, { secure: isSecure(req) });
+  loginLimiter.reset(req.ip);
+  res.json({ owner: true, redirect: '/admin' });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -328,18 +334,62 @@ app.get('/api/me', requireVisitor, (req, res) => {
     user: publicUser(req.user),
     ownerName: OWNER_NAME,
     ownerOnline: events.hasListeners(events.OWNER_CHANNEL),
+    pushEnabled: store.hasPushForUser(req.user.id),
   });
 });
 
-app.patch('/api/me', requireVisitor, (req, res) => {
-  const displayName = cleanText(req.body?.displayName, MAX_NAME_CHARS);
-  store.setDisplayName(req.user.id, displayName);
-  events.publish(events.OWNER_CHANNEL, 'user', { userId: req.user.id, displayName });
-  res.json({ user: publicUser({ ...req.user, display_name: displayName }) });
+app.post('/api/me/password', requireVisitor, (req, res) => {
+  const wait = accountLimiter.check(req.user.id);
+  if (wait) return limited(res, wait, 'Too many attempts. Try again later.');
+
+  if (!verifyPassword(String(req.body?.currentPassword || ''), req.user.password_hash)) {
+    return res.status(401).json({ error: 'Current password is wrong.' });
+  }
+  const next = validatePassword(req.body?.newPassword);
+  if (!next.ok) return res.status(400).json({ error: next.error });
+
+  store.setPassword(req.user.id, hashPassword(next.password));
+  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
-// Visitor chat routes
+// Push notifications
+// ---------------------------------------------------------------------------
+
+app.get('/api/push/key', (req, res) => {
+  res.json({ publicKey: push.publicKey });
+});
+
+function readSubscription(body) {
+  const endpoint = String(body?.endpoint || '');
+  const p256dh = String(body?.keys?.p256dh || '');
+  const auth = String(body?.keys?.auth || '');
+  if (!/^https:\/\//.test(endpoint) || !p256dh || !auth) return null;
+  return { endpoint, p256dh, auth };
+}
+
+app.post('/api/push/subscribe', requireVisitor, (req, res) => {
+  const sub = readSubscription(req.body);
+  if (!sub) return res.status(400).json({ error: 'That subscription looks wrong.' });
+  store.savePushSubscription({ ...sub, userId: req.user.id, isOwner: false });
+  res.json({ ok: true });
+});
+
+app.post('/api/push/unsubscribe', (req, res) => {
+  const endpoint = String(req.body?.endpoint || '');
+  if (endpoint) store.deletePushSubscription(endpoint);
+  res.json({ ok: true });
+});
+
+app.post('/api/owner/push/subscribe', requireOwner, (req, res) => {
+  const sub = readSubscription(req.body);
+  if (!sub) return res.status(400).json({ error: 'That subscription looks wrong.' });
+  store.savePushSubscription({ ...sub, userId: null, isOwner: true });
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Visitor chat
 // ---------------------------------------------------------------------------
 
 app.get('/api/conversations', requireVisitor, (req, res) => {
@@ -358,15 +408,6 @@ app.get('/api/conversations/:id', requireVisitor, (req, res) => {
   if (!conversation) return;
   store.markUserRead(conversation.id);
   res.json({ conversation, messages: store.listMessages(conversation.id) });
-});
-
-app.patch('/api/conversations/:id', requireVisitor, (req, res) => {
-  const conversation = conversationForUser(req, res);
-  if (!conversation) return;
-  const title = cleanText(req.body?.title, 80) || 'New chat';
-  store.setTitle(conversation.id, title);
-  events.publish(events.OWNER_CHANNEL, 'conversation', { conversationId: conversation.id, title });
-  res.json({ ok: true, title });
 });
 
 app.delete('/api/conversations/:id', requireVisitor, (req, res) => {
@@ -398,17 +439,17 @@ app.post('/api/conversations/:id/messages', requireVisitor, (req, res) => {
   const stored = store.addMessage(conversation.id, 'user', body);
   if (isFirst) store.setTitle(conversation.id, titleFrom(body));
 
-  // The sender draws its own message immediately, then also receives it back
-  // over the event stream (that stream is what keeps a visitor's other tabs in
-  // sync). Echoing the sender's own id lets each client recognise its own
-  // message and skip it instead of drawing it twice.
+  // The sender draws its own message immediately and also receives it back on
+  // its event stream (which is what syncs their other tabs). Echoing the
+  // sender's id lets that tab recognise its own message instead of drawing it
+  // twice.
   const message = { ...stored, clientId: cleanText(req.body?.clientId, 64) || null };
-
   const updated = store.getConversation(conversation.id);
+
   events.publish(events.OWNER_CHANNEL, 'message', {
     conversationId: conversation.id,
     userId: req.user.id,
-    displayName: req.user.display_name,
+    username: req.user.username,
     title: updated.title,
     message,
   });
@@ -418,7 +459,18 @@ app.post('/api/conversations/:id/messages', requireVisitor, (req, res) => {
     message,
   });
 
-  notifyOwner(req.user, conversation, message);
+  fireWebhook(req.user, conversation, message);
+  // Skip the push if a desk tab is already streaming — it would arrive
+  // alongside the message appearing on screen.
+  if (!events.hasListeners(events.OWNER_CHANNEL)) {
+    push
+      .notifyOwner({
+        title: `${req.user.username} asked a question`,
+        body: body.slice(0, 160),
+        conversationId: conversation.id,
+      })
+      .catch((err) => console.warn('[push] owner notify failed:', err.message));
+  }
 
   res.json({ message, title: updated.title, ownerOnline: events.hasListeners(events.OWNER_CHANNEL) });
 });
@@ -426,10 +478,7 @@ app.post('/api/conversations/:id/messages', requireVisitor, (req, res) => {
 app.post('/api/conversations/:id/typing', requireVisitor, (req, res) => {
   const conversation = conversationForUser(req, res);
   if (!conversation) return;
-  events.publish(events.OWNER_CHANNEL, 'typing', {
-    conversationId: conversation.id,
-    who: 'user',
-  });
+  events.publish(events.OWNER_CHANNEL, 'typing', { conversationId: conversation.id });
   res.json({ ok: true });
 });
 
@@ -439,7 +488,7 @@ app.get('/api/events', requireVisitor, (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Owner routes
+// Owner
 // ---------------------------------------------------------------------------
 
 app.get('/api/owner/me', requireOwner, (req, res) => {
@@ -448,6 +497,7 @@ app.get('/api/owner/me', requireOwner, (req, res) => {
     siteName: SITE_NAME,
     users: store.countUsers(),
     unread: store.adminUnreadTotal(),
+    pushEnabled: store.hasPushForOwner(),
   });
 });
 
@@ -466,7 +516,7 @@ app.get('/api/owner/conversations/:id', requireOwner, (req, res) => {
     user: user
       ? {
           id: user.id,
-          displayName: user.display_name,
+          username: user.username,
           note: user.note,
           blocked: Boolean(user.blocked),
           createdAt: user.created_at,
@@ -495,16 +545,26 @@ app.post('/api/owner/conversations/:id/messages', requireOwner, (req, res) => {
     userId: conversation.user_id,
     message,
   });
+
+  // The whole point of notifying someone is that they are not looking. If
+  // their tab is live they are about to see it anyway.
+  if (!events.hasListeners(`user:${conversation.user_id}`)) {
+    push
+      .notifyUser(conversation.user_id, {
+        title: `${OWNER_NAME} replied`,
+        body: body.slice(0, 160),
+        conversationId: conversation.id,
+      })
+      .catch((err) => console.warn('[push] user notify failed:', err.message));
+  }
+
   res.json({ message });
 });
 
 app.post('/api/owner/conversations/:id/typing', requireOwner, (req, res) => {
   const conversation = store.getConversation(req.params.id);
   if (!conversation) return res.status(404).json({ error: 'Chat not found.' });
-  events.publish(`user:${conversation.user_id}`, 'typing', {
-    conversationId: conversation.id,
-    who: 'owner',
-  });
+  events.publish(`user:${conversation.user_id}`, 'typing', { conversationId: conversation.id });
   res.json({ ok: true });
 });
 
@@ -525,17 +585,14 @@ app.delete('/api/owner/conversations/:id', requireOwner, (req, res) => {
 
 app.patch('/api/owner/users/:id', requireOwner, (req, res) => {
   const user = store.getUser(req.params.id);
-  if (!user) return res.status(404).json({ error: 'Visitor not found.' });
+  if (!user) return res.status(404).json({ error: 'Person not found.' });
   if (typeof req.body?.note === 'string') store.setNote(user.id, cleanText(req.body.note, 500));
-  if (typeof req.body?.displayName === 'string') {
-    store.setDisplayName(user.id, cleanText(req.body.displayName, MAX_NAME_CHARS));
-  }
   if (typeof req.body?.blocked === 'boolean') store.setBlocked(user.id, req.body.blocked);
   const fresh = store.getUser(user.id);
   res.json({
     user: {
       id: fresh.id,
-      displayName: fresh.display_name,
+      username: fresh.username,
       note: fresh.note,
       blocked: Boolean(fresh.blocked),
     },
@@ -546,18 +603,14 @@ app.get('/api/owner/events', requireOwner, (req, res) => {
   req.socket.setTimeout(0);
   const wasOnline = events.hasListeners(events.OWNER_CHANNEL);
   const unsubscribe = events.subscribe(events.OWNER_CHANNEL, res);
-
-  // Flip everyone's "away" badge the moment the desk is staffed, and back
-  // again when the last owner tab closes.
   if (!wasOnline) events.broadcastToVisitors('presence', { ownerOnline: true });
 
-  const announceDeparture = () => {
+  res.on('close', () => {
     unsubscribe();
     if (!events.hasListeners(events.OWNER_CHANNEL)) {
       events.broadcastToVisitors('presence', { ownerOnline: false });
     }
-  };
-  res.on('close', announceDeparture);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -565,7 +618,17 @@ app.get('/api/owner/events', requireOwner, (req, res) => {
 // ---------------------------------------------------------------------------
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
-app.use(express.static(PUBLIC_DIR, { extensions: [], index: false, maxAge: '1h' }));
+
+// The service worker must not be cached aggressively, or a fix to it could
+// take a day to reach people. It also has to be served from the root for its
+// scope to cover the whole site.
+app.get('/sw.js', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Service-Worker-Allowed', '/');
+  res.sendFile(path.join(PUBLIC_DIR, 'sw.js'));
+});
+
+app.use(express.static(PUBLIC_DIR, { index: false, maxAge: '1h' }));
 
 const page = (file) => (req, res) => res.sendFile(path.join(PUBLIC_DIR, file));
 app.get('/', page('index.html'));
@@ -584,16 +647,12 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Something went wrong on our side.' });
 });
 
-// ---------------------------------------------------------------------------
-
 app.listen(PORT, () => {
-  const combos = keyspaceSize().toLocaleString('en-US');
   console.log(`\n  ${SITE_NAME} is running on http://localhost:${PORT}`);
   console.log(`  Visitors:  http://localhost:${PORT}/`);
   console.log(`  Your desk: http://localhost:${PORT}/admin`);
-  console.log(`  Keys look like "meadow-drifting-${'4'.repeat(KEY_DIGITS)}" (${combos} possible)`);
   if (owner.generated) {
-    console.log(`\n  Your owner key (also saved in ${path.join(store.DATA_DIR, 'admin-key.txt')}):`);
+    console.log(`\n  Your owner key (also in ${path.join(store.DATA_DIR, 'admin-key.txt')}):`);
     console.log(`      ${owner.key}`);
     console.log('  Set ADMIN_KEY in .env to choose your own.\n');
   } else {

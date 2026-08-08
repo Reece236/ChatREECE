@@ -3,80 +3,53 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="dark light">
-<title>ChatREECE</title>
-<meta name="description" content="Ask a question, get a real answer. No account, no email — just a key you keep.">
+<meta name="color-scheme" content="light dark">
+<title>Sign in</title>
+<meta name="description" content="Ask a question and get a real answer.">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.json">
 <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
-<main class="landing">
-  <div class="card">
-    <div class="brand">
-      <div class="brand-mark" id="brandMark">R</div>
-      <div>
-        <div class="brand-name" id="brandName">ChatREECE</div>
-        <div class="brand-sub">Ask anything. A real person answers.</div>
-      </div>
-    </div>
+<main class="page">
+  <h1 id="title">ChatREECE</h1>
+  <p class="sub" id="sub">Ask a question. A real person answers.</p>
 
-    <!-- Step 1: choose a path ------------------------------------------->
-    <section id="stepStart">
-      <h1>Start chatting</h1>
-      <p class="lede">
-        No email, no password to invent. Tap below and you'll get a key made of
-        two everyday words — that key is how you come back to your conversation later.
-      </p>
-      <button class="btn btn-primary btn-block" id="newKeyBtn">Get my key and start</button>
-
-      <div class="divider">or</div>
-
-      <form id="loginForm" autocomplete="on">
-        <label for="keyInput" class="fine" style="display:block;text-align:left;margin:0 0 7px;">
-          Already have a key?
-        </label>
-        <input
-          class="field key-input"
-          id="keyInput"
-          name="password"
-          type="text"
-          inputmode="text"
-          autocapitalize="none"
-          autocorrect="off"
-          spellcheck="false"
-          autocomplete="current-password"
-          placeholder="meadow-drifting-472">
-        <button class="btn btn-block" id="loginBtn" type="submit" style="margin-top:9px;">
-          Open my chat
-        </button>
-      </form>
-
-      <div id="startNotice"></div>
-      <p class="fine">Spacing and capitals don't matter — "Meadow Drifting 472" works too.</p>
-    </section>
-
-    <!-- Step 2: here is your key ---------------------------------------->
-    <section id="stepKey" class="hidden">
-      <h1>This is your key</h1>
-      <p class="lede">Write it down or screenshot it. It's the only way back into this conversation.</p>
-
-      <div class="key-display">
-        <div class="key-label">Your key</div>
-        <div class="key-text" id="keyText">…</div>
-      </div>
-
-      <div class="row">
-        <button class="btn" id="copyBtn">Copy key</button>
-        <button class="btn btn-primary" id="continueBtn">Start chatting</button>
-      </div>
-
-      <div id="keyNotice"></div>
-      <p class="fine">
-        Anyone with this key can read your chat, so keep it to yourself.
-        There's no way to recover it if it's lost.
-      </p>
-    </section>
+  <div class="tabs" role="tablist">
+    <button class="tab" id="tabIn" role="tab" aria-selected="false" type="button">Sign in</button>
+    <button class="tab" id="tabUp" role="tab" aria-selected="true" type="button">Create account</button>
   </div>
+
+  <!-- Create account -->
+  <form id="formUp">
+    <label for="upUser">Username</label>
+    <input class="field" id="upUser" name="username" type="text"
+           autocomplete="username" autocapitalize="none" autocorrect="off"
+           spellcheck="false" required minlength="3" maxlength="20">
+
+    <label for="upPass">Password</label>
+    <input class="field" id="upPass" name="password" type="password"
+           autocomplete="new-password" required minlength="8">
+    <p class="hint" id="upHint">At least 8 characters.</p>
+
+    <button class="btn btn-main" type="submit" id="upBtn">Create account</button>
+    <p class="err hide" id="upErr"></p>
+  </form>
+
+  <!-- Sign in -->
+  <form id="formIn" class="hide">
+    <label for="inUser">Username</label>
+    <input class="field" id="inUser" name="username" type="text"
+           autocomplete="username" autocapitalize="none" autocorrect="off"
+           spellcheck="false" required>
+
+    <label for="inPass">Password</label>
+    <input class="field" id="inPass" name="password" type="password"
+           autocomplete="current-password" required>
+
+    <button class="btn btn-main" type="submit" id="inBtn">Sign in</button>
+    <p class="err hide" id="inErr"></p>
+  </form>
 </main>
 
 <script type="module" src="/js/login.js"></script>

@@ -5,17 +5,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { NOUNS, ACTIONS } = require('./words');
 
-const KEY_DIGITS = Math.min(4, Math.max(2, Number(process.env.KEY_DIGITS) || 3));
 const SESSION_DAYS = 365;
+const USERNAME_MIN = 3;
+const USERNAME_MAX = 20;
+const PASSWORD_MIN = 8;
+const PASSWORD_MAX = 200;
 
 // ---------------------------------------------------------------------------
-// Pepper
-//
-// Keys have no username attached, so a login has to find the account from the
-// key alone. Scanning every row and running a slow hash against each one would
-// make login cost grow with the user count, so each key also gets a fast keyed
-// digest that we can look up on an index. The pepper keeps that digest useless
-// to anyone who walks off with just the database file.
+// Pepper — used only for the owner key check, so that a stolen database does
+// not reveal whether a guessed admin key is correct.
 // ---------------------------------------------------------------------------
 
 function loadPepper(dataDir) {
@@ -28,56 +26,94 @@ function loadPepper(dataDir) {
 }
 
 // ---------------------------------------------------------------------------
-// Keys
+// Usernames
 // ---------------------------------------------------------------------------
 
 /**
- * Strips a typed key down to the form we actually hash, so "Dog Jumping 472",
- * "dog-jumping-472" and "dogjumping472" are all the same key. People retype
- * these from a sticky note; punctuation and capitals should never be the
- * reason someone can't get back into their chat.
+ * Usernames are matched case-insensitively. People do not remember whether they
+ * signed up as "Reece" or "reece", and being told "wrong password" because of a
+ * capital letter is a miserable way to lose access.
  */
-function normalizeKey(input) {
-  return String(input || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+function normalizeUsername(input) {
+  return String(input || '').trim().toLowerCase();
 }
 
-/** Generates a key like "dog-jumping-472". */
-function generateKey() {
-  const noun = NOUNS[crypto.randomInt(NOUNS.length)];
-  const action = ACTIONS[crypto.randomInt(ACTIONS.length)];
-  const min = 10 ** (KEY_DIGITS - 1);
-  const number = crypto.randomInt(min, 10 ** KEY_DIGITS);
-  return `${noun}-${action}-${number}`;
+function validateUsername(input) {
+  const raw = String(input || '').trim();
+  if (raw.length < USERNAME_MIN) {
+    return { ok: false, error: `Username needs at least ${USERNAME_MIN} characters.` };
+  }
+  if (raw.length > USERNAME_MAX) {
+    return { ok: false, error: `Username can be at most ${USERNAME_MAX} characters.` };
+  }
+  if (!/^[a-zA-Z0-9._-]+$/.test(raw)) {
+    return { ok: false, error: 'Use only letters, numbers, dots, dashes or underscores.' };
+  }
+  if (!/[a-zA-Z0-9]/.test(raw)) {
+    return { ok: false, error: 'Username needs at least one letter or number.' };
+  }
+  return { ok: true, display: raw, lookup: normalizeUsername(raw) };
 }
 
-/** Total number of distinct keys the generator can produce. */
-function keyspaceSize() {
-  const min = 10 ** (KEY_DIGITS - 1);
-  return NOUNS.length * ACTIONS.length * (10 ** KEY_DIGITS - min);
+function validatePassword(input) {
+  const raw = String(input || '');
+  if (raw.length < PASSWORD_MIN) {
+    return { ok: false, error: `Password needs at least ${PASSWORD_MIN} characters.` };
+  }
+  if (raw.length > PASSWORD_MAX) {
+    return { ok: false, error: 'That password is too long.' };
+  }
+  return { ok: true, password: raw };
 }
 
-function lookupHash(normalized, pepper) {
-  return crypto.createHmac('sha256', pepper).update(normalized).digest('hex');
-}
+// ---------------------------------------------------------------------------
+// Password hashing
+// ---------------------------------------------------------------------------
 
-function hashKey(normalized) {
+const SCRYPT_OPTIONS = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+
+function hashPassword(password) {
   const salt = crypto.randomBytes(16);
-  const derived = crypto.scryptSync(normalized, salt, 32);
+  const derived = crypto.scryptSync(password, salt, 32, SCRYPT_OPTIONS);
   return `scrypt$${salt.toString('hex')}$${derived.toString('hex')}`;
 }
 
-function verifyKey(normalized, stored) {
+function verifyPassword(password, stored) {
   const parts = String(stored || '').split('$');
   if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
   const salt = Buffer.from(parts[1], 'hex');
   const expected = Buffer.from(parts[2], 'hex');
   let derived;
   try {
-    derived = crypto.scryptSync(normalized, salt, expected.length);
+    derived = crypto.scryptSync(password, salt, expected.length, SCRYPT_OPTIONS);
   } catch {
     return false;
   }
   return crypto.timingSafeEqual(derived, expected);
+}
+
+/**
+ * Burns roughly the same time as a real password check. Without this, an
+ * unknown username returns noticeably faster than a known one with a bad
+ * password, which hands out a list of valid usernames.
+ */
+const DUMMY_HASH = hashPassword('never-matches-anything');
+function wasteTime(password) {
+  verifyPassword(String(password || ''), DUMMY_HASH);
+}
+
+// ---------------------------------------------------------------------------
+// Owner key (env-configured, not a signed-up account)
+// ---------------------------------------------------------------------------
+
+function normalizeKey(input) {
+  return String(input || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function generateKey(parts = 3) {
+  const words = [NOUNS[crypto.randomInt(NOUNS.length)]];
+  for (let i = 1; i < parts; i += 1) words.push(ACTIONS[crypto.randomInt(ACTIONS.length)]);
+  return `${words.join('-')}-${crypto.randomInt(100, 1000)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,13 +146,12 @@ function parseCookies(header) {
 }
 
 function setSessionCookie(res, name, token, { secure }) {
-  const maxAge = SESSION_DAYS * 24 * 60 * 60;
   const bits = [
     `${name}=${encodeURIComponent(token)}`,
     'Path=/',
     'HttpOnly',
     'SameSite=Lax',
-    `Max-Age=${maxAge}`,
+    `Max-Age=${SESSION_DAYS * 24 * 60 * 60}`,
   ];
   if (secure) bits.push('Secure');
   res.append('Set-Cookie', bits.join('; '));
@@ -130,10 +165,6 @@ function clearSessionCookie(res, name, { secure }) {
 
 // ---------------------------------------------------------------------------
 // Rate limiting
-//
-// A key is the whole credential and there is no username to target, so every
-// guess is a guess against all accounts at once. Slowing guesses down is what
-// makes short, friendly keys safe to use.
 // ---------------------------------------------------------------------------
 
 class RateLimiter {
@@ -157,7 +188,6 @@ class RateLimiter {
     return null;
   }
 
-  /** Called after a success so honest users don't burn through their budget. */
   reset(bucket) {
     this.hits.delete(bucket);
   }
@@ -173,19 +203,23 @@ class RateLimiter {
 }
 
 module.exports = {
-  KEY_DIGITS,
-  SESSION_DAYS,
+  PASSWORD_MIN,
   RateLimiter,
+  SESSION_DAYS,
+  USERNAME_MAX,
+  USERNAME_MIN,
   clearSessionCookie,
   generateKey,
-  hashKey,
-  keyspaceSize,
+  hashPassword,
   loadPepper,
-  lookupHash,
   newSessionToken,
   normalizeKey,
+  normalizeUsername,
   parseCookies,
   setSessionCookie,
   tokenHash,
-  verifyKey,
+  validatePassword,
+  validateUsername,
+  verifyPassword,
+  wasteTime,
 };

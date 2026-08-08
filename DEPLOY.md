@@ -3,12 +3,11 @@
 ## Read this first
 
 ChatREECE keeps everything in a SQLite file on disk: conversations, messages,
-the hash of every visitor's key, and the secret (`pepper.key`) those hashes are
-built on. **That directory must survive restarts and redeploys.**
+every account and password hash, and the keys your notifications are signed
+with. **That directory must survive restarts and redeploys.**
 
-If it doesn't, every visitor's key silently stops working and their
-conversations are gone — and because keys have no email attached, there is no
-way to give anyone their chat back. This is the one mistake worth being careful
+If it doesn't, every account and conversation is gone — and because there are
+no email addresses, there is no way to give anyone their account back. This is the one mistake worth being careful
 about, and it's why the free tier of most hosts is not suitable: free tiers
 generally give you an ephemeral filesystem that is wiped on every deploy.
 
@@ -122,8 +121,8 @@ Docker, plain `npm ci && npm start` behind a process manager works the same.
    the key was generated into `DATA_DIR/admin-key.txt` and printed in the deploy
    logs — grab it and then set `ADMIN_KEY` properly.
 
-2. **Test it as a visitor.** Open the site in a private window, get a key, ask
-   something. It should appear in your desk within a second. Reply, and watch it
+2. **Test it as a visitor.** Open the site in a private window, create an
+   account, ask something. It should appear in your desk within a second. Reply, and watch it
    land in the visitor window without a refresh.
 
 3. **Add it to your site** once you know the URL:
@@ -136,9 +135,14 @@ Docker, plain `npm ci && npm start` behind a process manager works the same.
    will refuse to frame the chat. `https://reece.io` and `https://www.reece.io`
    count as different origins — list both if you use both.
 
-4. **Get notified.** Without a webhook you have to remember to check `/admin`.
-   With `NOTIFY_WEBHOOK_URL` set to a Slack or Discord incoming webhook, new
-   questions come to you.
+4. **Turn on notifications.** Open `/admin` on your phone and tap "Turn on" in
+   the bar at the top; visitors get the same option in their chat. Notifications
+   need HTTPS, which every option above gives you. On iPhone you must add the
+   site to the Home Screen first and open it from there — an Apple restriction
+   on web push.
+
+   `NOTIFY_WEBHOOK_URL` set to a Slack or Discord incoming webhook gives you a
+   second copy of every question.
 
 ## Scaling note
 
@@ -160,5 +164,6 @@ The whole system is one directory. To back it up:
 sqlite3 $DATA_DIR/chatreece.db ".backup '/tmp/backup.db'"
 ```
 
-Copy `chatreece.db` **and** `pepper.key` together. The database is useless
-without the pepper — visitor keys can't be verified without it.
+Copy `chatreece.db` **and** `pepper.key` together. The database holds the
+notification signing keys too, so restoring it keeps existing subscriptions
+working.

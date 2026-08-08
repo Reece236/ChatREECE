@@ -2,104 +2,96 @@ import { api } from './api.js';
 
 const $ = (id) => document.getElementById(id);
 
-const stepStart = $('stepStart');
-const stepKey = $('stepKey');
-const startNotice = $('startNotice');
-const keyNotice = $('keyNotice');
-const newKeyBtn = $('newKeyBtn');
-const loginForm = $('loginForm');
-const loginBtn = $('loginBtn');
-const keyInput = $('keyInput');
-const keyText = $('keyText');
-const copyBtn = $('copyBtn');
-const continueBtn = $('continueBtn');
-
-function notice(target, message, kind = 'bad') {
-  target.innerHTML = '';
-  if (!message) return;
-  const div = document.createElement('div');
-  div.className = `notice notice-${kind}`;
-  div.textContent = message;
-  target.appendChild(div);
+function show(el, on) {
+  el.classList.toggle('hide', !on);
 }
 
-// Someone arriving with a live session should land straight in their chat.
-// ?switch=1 is the escape hatch for signing in with a different key.
-(async function bootstrap() {
+function fail(el, message) {
+  el.textContent = message;
+  show(el, Boolean(message));
+}
+
+function selectTab(signingIn) {
+  $('tabIn').setAttribute('aria-selected', String(signingIn));
+  $('tabUp').setAttribute('aria-selected', String(!signingIn));
+  show($('formIn'), signingIn);
+  show($('formUp'), !signingIn);
+  fail($('inErr'), '');
+  fail($('upErr'), '');
+  // Deliberately no autofocus: on a phone it throws the keyboard up over the
+  // page before you have read anything.
+}
+
+$('tabIn').addEventListener('click', () => selectTab(true));
+$('tabUp').addEventListener('click', () => selectTab(false));
+
+async function submit({ url, form, button, errBox, label }) {
+  const data = new FormData(form);
+  fail(errBox, '');
+  button.disabled = true;
+  button.textContent = 'Just a moment…';
+  try {
+    const result = await api(url, {
+      method: 'POST',
+      body: {
+        username: String(data.get('username') || '').trim(),
+        password: String(data.get('password') || ''),
+      },
+    });
+    location.replace(result.redirect || '/chat');
+  } catch (err) {
+    fail(errBox, err.message);
+    button.disabled = false;
+    button.textContent = label;
+    // Put the cursor where the problem is so a phone user does not have to hunt.
+    const field = err.field === 'username' ? form.querySelector('[name=username]') : null;
+    if (field) field.focus();
+  }
+}
+
+$('formUp').addEventListener('submit', (event) => {
+  event.preventDefault();
+  submit({
+    url: '/api/auth/signup',
+    form: $('formUp'),
+    button: $('upBtn'),
+    errBox: $('upErr'),
+    label: 'Create account',
+  });
+});
+
+$('formIn').addEventListener('submit', (event) => {
+  event.preventDefault();
+  submit({
+    url: '/api/auth/login',
+    form: $('formIn'),
+    button: $('inBtn'),
+    errBox: $('inErr'),
+    label: 'Sign in',
+  });
+});
+
+(async function start() {
   const params = new URLSearchParams(location.search);
+  if (params.get('signin') === '1') selectTab(true);
+
   try {
     const config = await api('/api/config');
-    document.title = config.siteName;
-    $('brandName').textContent = config.siteName;
-    $('brandMark').textContent = (config.ownerName || 'R').slice(0, 1).toUpperCase();
-    keyInput.placeholder = `meadow-drifting-${'4'.repeat(config.keyDigits || 3)}`;
-    document.querySelector('.brand-sub').textContent =
-      `Ask anything. ${config.ownerName} answers personally.`;
+    document.title = `Sign in · ${config.siteName}`;
+    $('title').textContent = config.siteName;
+    $('sub').textContent = `Ask a question. ${config.ownerName} answers personally.`;
+    $('upHint').textContent = `At least ${config.passwordMin} characters.`;
+    $('upPass').minLength = config.passwordMin;
   } catch {
-    /* Defaults in the markup are good enough. */
+    /* The markup already says something sensible. */
   }
 
+  // Already signed in on this device? Skip straight past the form.
   if (params.get('switch') === '1') return;
   try {
     await api('/api/me');
     location.replace('/chat');
   } catch {
-    /* Not signed in — stay here. */
+    /* Not signed in — stay on the form. */
   }
 })();
-
-newKeyBtn.addEventListener('click', async () => {
-  newKeyBtn.disabled = true;
-  newKeyBtn.textContent = 'Making your key…';
-  notice(startNotice, '');
-  try {
-    const data = await api('/api/auth/new', { method: 'POST', body: {} });
-    keyText.textContent = data.key;
-    stepStart.classList.add('hidden');
-    stepKey.classList.remove('hidden');
-  } catch (err) {
-    notice(startNotice, err.message);
-  } finally {
-    newKeyBtn.disabled = false;
-    newKeyBtn.textContent = 'Get my key and start';
-  }
-});
-
-loginForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const key = keyInput.value.trim();
-  if (!key) {
-    notice(startNotice, 'Type your key first.');
-    return;
-  }
-  loginBtn.disabled = true;
-  notice(startNotice, '');
-  try {
-    const data = await api('/api/auth/login', { method: 'POST', body: { key } });
-    location.replace(data.redirect || '/chat');
-  } catch (err) {
-    notice(startNotice, err.message);
-    loginBtn.disabled = false;
-  }
-});
-
-copyBtn.addEventListener('click', async () => {
-  const key = keyText.textContent;
-  try {
-    await navigator.clipboard.writeText(key);
-    notice(keyNotice, 'Copied. Paste it somewhere safe.', 'good');
-  } catch {
-    // Clipboard access is blocked in some embedded contexts; selecting the
-    // text is the next best thing.
-    const range = document.createRange();
-    range.selectNodeContents(keyText);
-    const selection = window.getSelection();
-    selection.removeAllRanges();
-    selection.addRange(range);
-    notice(keyNotice, 'Copy blocked by your browser — the key is selected, press Ctrl/Cmd+C.');
-  }
-});
-
-continueBtn.addEventListener('click', () => {
-  location.href = '/chat';
-});

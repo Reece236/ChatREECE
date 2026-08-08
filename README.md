@@ -1,32 +1,27 @@
 # ChatREECE
 
-A chat widget for your website that looks and feels like an AI chatbot — except
-the answers are yours. Visitors ask questions in a familiar ChatGPT-style
-window; the questions land in an inbox you open whenever you feel like it; your
-replies show up on their side exactly where a bot's reply would.
+A chat for your website that works like an AI chatbot, except the answers are
+yours. People ask questions in a plain chat window; the questions land in an
+inbox you open whenever you feel like it; your replies appear on their side
+exactly where a bot's reply would.
 
-No accounts, no email, no passwords to invent. A visitor taps one button and
-gets a key like **`meadow-drifting-472`**. That key is the whole login — no
-username, nothing to remember beyond two everyday words and a number. They can
-close the tab, come back next week, type the key, and their conversation is
-right where they left it.
+People sign up with a username and password. Nothing else — no email, no
+verification, no profile. Both sides can turn on notifications, so nobody has
+to sit refreshing a page waiting for an answer.
 
 ## What's in the box
 
 | Page | Who it's for | What it does |
 |---|---|---|
-| `/` | Visitors | Get a key, or come back with one |
-| `/chat` | Visitors | The chat window |
-| `/admin` | You | Your answering desk — every conversation, unread first |
+| `/` | Visitors | Create an account or sign in |
+| `/chat` | Visitors | The chat |
+| `/admin` | You | Your answering desk — every conversation, unanswered first |
 | `/embed.js` | Your site | One script tag that adds a chat bubble to any page |
-
-Answers stream to the visitor live if they still have the tab open, and are
-waiting for them if they don't. Both sides get typing dots, and visitors can see
-whether you're at the desk right now or away.
 
 ## Run it
 
-Needs Node 22.5 or newer (it uses Node's built-in SQLite — nothing to compile).
+Needs Node 22.5 or newer (it uses Node's built-in SQLite, so there is nothing
+to compile).
 
 ```bash
 npm install
@@ -38,143 +33,138 @@ Then open http://localhost:3000. Your owner key is printed on first boot and
 saved to `data/admin-key.txt` unless you set `ADMIN_KEY` yourself.
 
 ```bash
-npm run smoke   # end-to-end check: keys, chat, isolation, live delivery
+npm test            # both suites
+npm run smoke       # accounts, chat, isolation, live delivery
+npm run test:push   # real push delivery against a fake push service
 ```
 
-## How the keys work
+## The look
 
-Keys are `noun-verb-number`, drawn from ~500 nouns and ~300 actions, so they
-read like something you'd say out loud: `crayon-rehearsing-739`,
-`harbor-drifting-812`.
+Deliberately plain. System fonts, flat colours, square-ish corners, no
+shadows, no gradients, no loading spinners, no animation beyond a drawer
+sliding. It follows your phone's light or dark setting on its own.
 
-Typing them is deliberately forgiving. Spacing, hyphens and capitals are all
-stripped before the key is checked, so every one of these opens the same chat:
+It is also small: **the sign-in page is about 17 KB over 7 requests**, which
+includes the icon and the web app manifest. There is no framework and no build
+step — the files you edit are the files the browser gets. Nothing is
+server-rendered per request, so pages paint immediately and the chat fills in.
 
-```
-dog-jumping-472      Dog Jumping 472      dogjumping472      DOG JUMPING 472
-```
+Mobile is the default layout rather than an afterthought:
 
-**On the number of digits.** You described keys like "dog jumping 47" — two
-digits. The default here is three, because there's no username attached: every
-guess an attacker makes is a guess against *every* visitor's chat at once, and
-the third digit multiplies the work by ten for no extra effort from the person
-typing it. Set `KEY_DIGITS=2` in `.env` if you'd rather have the shorter form;
-existing keys keep working either way.
+- Every tap target is at least 44px, and inputs are 16px so iOS does not zoom
+  the page when you focus them.
+- The composer sits above the home indicator using the safe-area insets, and
+  the layout uses `100dvh` so the mobile browser's shrinking toolbar does not
+  push it off screen.
+- Enter inserts a newline on a touch keyboard (where people expect it) and
+  sends on a physical keyboard.
+- The chat list is a drawer with its own close button, because the strip of
+  backdrop beside an open drawer is a poor tap target.
 
-The rest of the protection:
+## Accounts
 
-- Keys are stored hashed (scrypt), never in plain text. If someone steals the
-  database file they still can't read the keys.
-- Login is rate limited to 12 tries per 15 minutes per IP, and key creation to
-  8 per hour per IP.
-- A key is looked up through an HMAC index keyed by a server-side secret
-  (`data/pepper.key`), so login stays fast no matter how many visitors you have.
+Usernames are 3–20 characters, letters and numbers plus `.`, `-` and `_`, and
+are matched case-insensitively — signing up as `Reece` and signing in as
+`reece` is the same account. Passwords are a minimum of 8 characters and are
+stored as scrypt hashes.
 
-Because a key is the whole credential, **there is no recovery**. If a visitor
-loses their key, their old conversation is gone to them and they start fresh.
-The UI says so plainly on the screen where the key is handed out.
+Signing in with an unknown username takes the same time and returns the same
+message as a wrong password, so the form cannot be used to discover who has an
+account. Logins are rate limited to 10 tries per 15 minutes per IP.
+
+Account creation is limited to 10 per hour per IP, and only counts accounts
+actually created — a few fat-fingered passwords will not lock someone out.
+
+There is no password reset, because there is no email address to send one to.
+If you need to help someone back in, you can see them in the desk but the
+honest answer today is that they make a new account.
+
+## Notifications
+
+Both sides can turn them on, from a bar at the top of the chat. It only asks
+after a tap, never on page load.
+
+- **Visitors** get told when you answer.
+- **You** get told when a question comes in.
+
+A notification is only sent when the recipient does not already have the page
+open and live — if their tab is streaming, the message is already appearing on
+their screen and a second buzz would be noise.
+
+Two things worth knowing:
+
+- **Notifications need HTTPS.** They will not work over plain `http://`, apart
+  from `localhost` while developing.
+- **On iPhone, the site has to be added to the Home Screen first** (Share →
+  Add to Home Screen), then opened from there. That is an Apple restriction on
+  web push, not something this app can work around. The app detects iOS and
+  says this instead of showing a button that cannot work.
+
+Signing keys are generated on first boot and stored in the database, so they
+survive restarts. If you set `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` yourself,
+changing them later invalidates every existing subscription.
+
+You can also set `NOTIFY_WEBHOOK_URL` to a Slack or Discord incoming webhook
+for a copy of every new question.
 
 ## Your answering desk
 
-Go to `/admin` and enter your owner key. You'll see:
-
-- Every conversation, newest first, with a badge on anything unanswered
-- An **All / Waiting** toggle to hide what you've already handled
-- The full thread, with your replies appearing on the visitor's side as the
-  chatbot's answers
-- A private note field per visitor that only you can see
-- Block (kills that key) and delete (removes the conversation for both of you)
-
-You can leave it closed for a week. Questions pile up; nothing expires.
-
-### Getting told about new questions
-
-Set `NOTIFY_WEBHOOK_URL` to a Slack or Discord incoming webhook — or any URL
-that takes a JSON POST — and you'll get a ping whenever someone asks something.
-The payload includes `text` and `content` fields so it works with both Slack and
-Discord as-is.
+Go to `/admin` and enter your owner key. You get every conversation newest
+first, unread badges, an All/Waiting filter, a private per-person note only you
+can see, and block and delete. You can leave it closed for a week; questions
+pile up and nothing expires.
 
 ## Putting it on your site
-
-**One script tag** adds a chat bubble in the corner of any page:
 
 ```html
 <script src="https://your-chat-host.example.com/embed.js" defer></script>
 ```
 
-Options, all optional:
+Options: `data-label`, `data-position="left"`, `data-accent="#1a4fd0"`,
+`data-open="1"`. The widget renders inside a shadow root so your site's CSS
+cannot leak into it or vice versa, and the iframe is not loaded until someone
+opens the bubble. You can drive it yourself with `ChatREECE.open()`,
+`.close()`, `.toggle()`.
 
-```html
-<script src="https://your-chat-host.example.com/embed.js"
-        data-label="Ask Reece"
-        data-position="left"
-        data-accent="#6f8cff"
-        defer></script>
-```
-
-The widget renders inside a shadow root, so your site's CSS can't leak into it
-and its CSS can't leak out. The iframe isn't loaded until someone actually opens
-the bubble, so the widget costs your page nothing until it's wanted. You can
-also drive it yourself: `ChatREECE.open()`, `.close()`, `.toggle()`.
-
-**Important:** add your site's origin to `EMBED_ORIGINS` or the browser will
-refuse to frame the chat:
-
-```
-EMBED_ORIGINS=https://reece.io,https://www.reece.io
-```
-
-If you'd rather not use the bubble, link straight to the chat
-(`https://your-chat-host.example.com/`) or drop it in an iframe yourself.
+Add your site's origin to `EMBED_ORIGINS` or the browser will refuse to frame
+the chat. `https://reece.io` and `https://www.reece.io` are different origins —
+list both if you use both.
 
 ## Deploying
 
-**See [DEPLOY.md](DEPLOY.md) for step-by-step instructions.** There's a
-`render.yaml`, a `fly.toml` and a `docker-compose.yml` in here, so the host does
-most of the configuring itself.
+**See [DEPLOY.md](DEPLOY.md).** There's a `fly.toml`, a `render.yaml` and a
+`docker-compose.yml`, plus `./scripts/deploy-fly.sh` for a one-command deploy.
 
-Any host that runs a Node process works — Render, Railway, Fly.io, a VPS.
+Two things matter wherever it runs:
 
-Two things matter:
+1. **Attach a persistent disk** and point `DATA_DIR` at it. Accounts,
+   conversations and the notification signing keys all live there.
+2. **Set `TRUST_PROXY=1`** when something terminates TLS in front of it.
 
-1. **Attach a persistent disk** and point `DATA_DIR` at it. The SQLite file, the
-   pepper and the generated admin key all live there; on a host with an
-   ephemeral filesystem, every deploy would wipe every conversation and
-   invalidate every visitor's key.
-2. **Set `TRUST_PROXY=1`** when there's a reverse proxy or CDN in front. Without
-   it, login cookies won't get the `Secure` flag and rate limiting will see the
-   proxy's IP instead of the visitor's.
-
-There's a `Dockerfile` if your host prefers containers.
-
-Note that this is a stateful, single-process app — SQLite plus in-memory event
-streams. Run one instance of it, not several behind a load balancer.
+This is a single-process, stateful app — SQLite plus in-memory tracking of who
+is connected. Run one instance, not several behind a load balancer.
 
 ## Configuration
-
-Everything is optional except `ADMIN_KEY`, which you should set yourself.
 
 | Variable | Default | What it does |
 |---|---|---|
 | `PORT` | `3000` | Port to listen on |
-| `ADMIN_KEY` | generated | Your owner key. Generated and saved to `data/admin-key.txt` if unset |
-| `DATA_DIR` | `./data` | Where the database, pepper and admin key live |
+| `ADMIN_KEY` | generated | Your owner key for `/admin` |
+| `DATA_DIR` | `./data` | Where the database and pepper live |
 | `TRUST_PROXY` | `0` | Set to `1` behind a reverse proxy |
-| `KEY_DIGITS` | `3` | Digits on the end of a visitor key (2–4) |
-| `SITE_NAME` | `ChatREECE` | Shown in the browser tab and on the login screen |
+| `SITE_NAME` | `ChatREECE` | Shown on the sign-in screen |
 | `OWNER_NAME` | `Reece` | The name on your replies |
-| `EMBED_ORIGINS` | — | Comma-separated origins allowed to embed the widget |
+| `EMBED_ORIGINS` | — | Origins allowed to embed the widget |
+| `PUSH_CONTACT` | — | Contact address sent with push requests |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | generated | Pin your own signing keys |
 | `NOTIFY_WEBHOOK_URL` | — | Pinged when a new question arrives |
-| `KEY_PEPPER` | generated | Overrides the generated `data/pepper.key` |
-
-Changing `ADMIN_KEY` signs out every owner session on the next boot. Changing
-`KEY_PEPPER` after visitors exist will lock all of them out — don't.
 
 ## What gets stored
 
-Conversations, messages, a hash of each key, and whatever display name a visitor
-chooses to give. No email, no IP logging, no third-party scripts, no analytics.
-Nothing leaves your server except the optional webhook ping.
+Usernames, scrypt password hashes, conversations, messages, notification
+subscriptions, and any private note you write. No email, no IP logging, no
+analytics, no third-party scripts. Nothing leaves your server except
+notifications and the optional webhook.
 
 ## Layout
 
@@ -182,16 +172,20 @@ Nothing leaves your server except the optional webhook ping.
 server/
   index.js    routes, auth middleware, rate limits
   db.js       SQLite schema and queries
-  auth.js     key generation, hashing, sessions, rate limiter
-  words.js    the two word lists keys are built from
+  auth.js     usernames, password hashing, sessions, rate limiter
+  push.js     web push delivery and subscription pruning
   events.js   server-sent-events hub for live delivery
+  words.js    word lists, used only to generate an owner key
 public/
-  index.html  landing + login          js/login.js
-  chat.html   visitor chat             js/chat.js
-  admin.html  answering desk           js/admin.js
-  embed.js    the drop-in bubble       css/style.css
+  index.html  sign in / create account    js/login.js
+  chat.html   the chat                    js/chat.js
+  admin.html  answering desk              js/admin.js
+  sw.js       service worker (notifications only)
+  embed.js    the drop-in bubble          css/style.css
 test/
-  smoke.js    end-to-end check against a real server
+  smoke.js    accounts, chat, isolation, live delivery
+  push.js     real push delivery against a fake push service
 ```
 
-No build step, no framework, one dependency (Express).
+One runtime dependency for the server (Express) and one for notifications
+(web-push). Nothing on the client.

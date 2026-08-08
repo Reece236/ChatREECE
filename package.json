@@ -2,7 +2,7 @@
   "name": "chatreece",
   "version": "1.0.0",
   "private": true,
-  "description": "A ChatGPT-style chat for your website where the answers come from you, not an AI. Visitors get a simple two-word passkey instead of an account.",
+  "description": "A plain, mobile-first chat for your website where the answers come from you, not an AI. Username and password sign-up, with notifications for both sides.",
   "main": "server/index.js",
   "engines": {
     "node": ">=22.5.0"
@@ -11,9 +11,12 @@
     "start": "node --disable-warning=ExperimentalWarning server/index.js",
     "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
     "smoke": "node --disable-warning=ExperimentalWarning test/smoke.js",
-    "key": "node scripts/make-key.js"
+    "key": "node scripts/make-key.js",
+    "test:push": "node --disable-warning=ExperimentalWarning test/push.js",
+    "test": "npm run smoke && npm run test:push"
   },
   "dependencies": {
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "web-push": "^3.6.7"
   }
 }
